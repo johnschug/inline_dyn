@@ -1,0 +1,15 @@
+[package]
+name = "inline"
+version = "0.1.0"
+edition = "2018"
+authors = ["John Schug <john.ips.schug@gmail.com>"]
+license = "MIT"
+
+[badges]
+maintenance = { status = "experimental" }
+
+[features]
+nightly = []
+std = []
+
+[dependencies]
