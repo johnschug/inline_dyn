@@ -10,6 +10,9 @@ maintenance = { status = "experimental" }
 
 [features]
 nightly = []
-std = []
+alloc = []
+std = ["alloc"]
 
 [dependencies]
+static_assertions = "1.1"
+typenum = "1.11"
