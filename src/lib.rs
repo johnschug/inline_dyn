@@ -86,10 +86,8 @@ impl<'a, D: ?Sized, S: Size, A: Align> InlineDyn<'a, D, S, A> {
 
     pub fn grow<U, V>(this: Self) -> InlineDyn<'a, D, U, V>
     where
-        U: Size,
-        V: Align,
-        U: typenum::IsGreaterOrEqual<S>,
-        V: typenum::IsGreaterOrEqual<A>, {
+        U: Size + typenum::IsGreaterOrEqual<S>,
+        V: Align + typenum::IsGreaterOrEqual<A>, {
         let (size, align) = {
             let val = this.get_ref();
             (mem::size_of_val(val), mem::align_of_val(val))

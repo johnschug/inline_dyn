@@ -1,16 +1,18 @@
 use core::mem::{self, MaybeUninit};
 
 use static_assertions::{const_assert, const_assert_eq};
-use typenum::{UInt, UTerm, Unsigned, B0, B1, U0, U1, U2, U4, U8};
+use typenum::{UInt, UTerm, Unsigned, B0, B1, U0, U1, U16, U2, U32, U4, U64, U8};
 
 // Static assertions
 const_assert_eq!(DefaultSize::USIZE, mem::size_of::<usize>());
 
-const_assert!(mem::align_of::<<U1 as Align>::Output>() >= 1);
-const_assert!(mem::align_of::<<U2 as Align>::Output>() >= 2);
-const_assert!(mem::align_of::<<U4 as Align>::Output>() >= 4);
-const_assert!(mem::align_of::<<U8 as Align>::Output>() >= 8);
-// const_assert!(mem::align_of::<<U16 as Alignment>::Output>() >= 16);
+const_assert!(mem::align_of::<RawStorage<U0, U1>>() >= 1);
+const_assert!(mem::align_of::<RawStorage<U0, U2>>() >= 2);
+const_assert!(mem::align_of::<RawStorage<U0, U4>>() >= 4);
+const_assert!(mem::align_of::<RawStorage<U0, U8>>() >= 8);
+const_assert!(mem::align_of::<RawStorage<U0, U16>>() >= 16);
+const_assert!(mem::align_of::<RawStorage<U0, U32>>() >= 32);
+const_assert!(mem::align_of::<RawStorage<U0, U64>>() >= 64);
 
 #[cfg(feature = "alloc")]
 const _: () = {
@@ -26,6 +28,10 @@ pub type DefaultSize = typenum::U4;
 pub type DefaultSize = typenum::U8;
 #[cfg(target_pointer_width = "128")]
 pub type DefaultSize = typenum::U16;
+#[cfg(target_pointer_width = "256")]
+pub type DefaultSize = typenum::U32;
+#[cfg(target_pointer_width = "512")]
+pub type DefaultSize = typenum::U64;
 
 pub trait Sealed {}
 
@@ -71,21 +77,53 @@ impl Align for U1 {
     type Output = u8;
 }
 
+#[repr(align(2))]
+#[derive(Copy, Clone)]
+pub struct Aligned2(u8);
+
 impl Align for U2 {
-    type Output = u16;
+    type Output = Aligned2;
 }
+
+#[repr(align(4))]
+#[derive(Copy, Clone)]
+pub struct Aligned4(u8);
 
 impl Align for U4 {
-    type Output = u32;
+    type Output = Aligned4;
 }
+
+#[repr(align(8))]
+#[derive(Copy, Clone)]
+pub struct Aligned8(u8);
 
 impl Align for U8 {
-    type Output = u64;
+    type Output = Aligned8;
 }
 
-// impl Alignment for U16 {
-//     type Output = u128;
-// }
+#[repr(align(16))]
+#[derive(Copy, Clone)]
+pub struct Aligned16(u8);
+
+impl Align for U16 {
+    type Output = Aligned16;
+}
+
+#[repr(align(32))]
+#[derive(Copy, Clone)]
+pub struct Aligned32(u8);
+
+impl Align for U32 {
+    type Output = Aligned32;
+}
+
+#[repr(align(64))]
+#[derive(Copy, Clone)]
+pub struct Aligned64(u8);
+
+impl Align for U64 {
+    type Output = Aligned64;
+}
 
 // const-generic version:
 // // Placeholder for builtin type.
@@ -93,7 +131,7 @@ impl Align for U8 {
 // struct MinAlign<const ALIGN: usize>;
 //
 // #[repr(C)]
-// pub union RawStorage<const SIZE: usize, const ALIGN: usize> {
+// pub(crate) union RawStorage<const SIZE: usize, const ALIGN: usize> {
 //     bytes: [MaybeUninit<u8>; SIZE],
 //     _align: MinAlign<ALIGN>,
 // }
