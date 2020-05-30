@@ -1,3 +1,4 @@
+#![cfg_attr(feature = "nightly", allow(incomplete_features))]
 #![cfg_attr(feature = "nightly", feature(unsize, const_generics))]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #[cfg(feature = "alloc")]

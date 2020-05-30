@@ -1,13 +1,13 @@
 #![allow(dead_code)]
-use core::marker::Unsize;
+use core::{marker::Unsize, mem};
 
-use crate::{Align, InlineDyn, Size, VTable};
+use crate::{storage::RawStorage, Align, InlineDyn, Size, VTable};
 
-pub struct Bool<const B: bool>;
+pub struct Predicate<const B: bool>;
 
-pub trait Assert {}
+pub trait Satisfied {}
 
-impl Assert for Bool<{ true }> {}
+impl Satisfied for Predicate<true> {}
 
 impl<D: ?Sized> VTable<D> {
     fn new<'a, T>() -> &'a Self
@@ -25,11 +25,17 @@ where
     S: Size,
     A: Align,
 {
-    // TODO: Re-enable once lazy normalization has landed.
-    // pub fn new<U>(value: U) -> Self
-    // where U: Unsize<D> + 'a, Bool<{mem::size_of::<U>() <= mem::size_of::<T>() && mem::align_of::<U>() <= mem::align_of::<T>()}>: Assert {
-    //     Self::try_new(value).unwrap()
-    // }
+    pub fn new<T>(value: T) -> Self
+    where
+        T: Unsize<D> + 'a,
+        Predicate<
+            {
+                mem::size_of::<T>() <= mem::size_of::<RawStorage<S, A>>()
+                    && mem::align_of::<T>() <= mem::align_of::<RawStorage<S, A>>()
+            },
+        >: Satisfied, {
+        Self::try_new(value).ok().expect("impossible!")
+    }
 
     pub fn try_new<T>(value: T) -> Result<Self, T>
     where T: Unsize<D> + 'a {
@@ -51,3 +57,14 @@ where
             .expect("insufficient space for box")
     }
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use crate::fmt::{InlineDynDebug, InlineDynDisplay};
+//
+//     #[test]
+//     fn test_new() {
+//         let val: InlineDynDebug = InlineDynDebug::new(42usize);
+//         assert_eq!(format!("{:?}", val.get_ref()), "42");
+//     }
+// }
