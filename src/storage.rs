@@ -1,5 +1,6 @@
 use core::mem::{self, MaybeUninit};
 
+use cfg_if::cfg_if;
 use static_assertions::{const_assert, const_assert_eq};
 use typenum::{UInt, UTerm, Unsigned, B0, B1, U0, U1, U16, U2, U32, U4, U64, U8};
 
@@ -20,18 +21,23 @@ const _: () = {
     const_assert!(mem::align_of::<alloc::boxed::Box<u8>>() <= mem::align_of::<RawStorage>());
 };
 
-#[cfg(target_pointer_width = "16")]
-pub type DefaultSize = typenum::U2;
-#[cfg(target_pointer_width = "32")]
-pub type DefaultSize = typenum::U4;
-#[cfg(target_pointer_width = "64")]
-pub type DefaultSize = typenum::U8;
-#[cfg(target_pointer_width = "128")]
-pub type DefaultSize = typenum::U16;
-#[cfg(target_pointer_width = "256")]
-pub type DefaultSize = typenum::U32;
-#[cfg(target_pointer_width = "512")]
-pub type DefaultSize = typenum::U64;
+cfg_if! {
+    if #[cfg(target_pointer_width = "16")] {
+        pub type DefaultSize = typenum::U2;
+    } else if #[cfg(target_pointer_width = "32")] {
+        pub type DefaultSize = typenum::U4;
+    } else if #[cfg(target_pointer_width = "64")] {
+        pub type DefaultSize = typenum::U8;
+    } else if #[cfg(target_pointer_width = "128")] {
+        pub type DefaultSize = typenum::U16;
+    } else if #[cfg(target_pointer_width = "256")] {
+        pub type DefaultSize = typenum::U32;
+    } else if #[cfg(target_pointer_width = "512")] {
+        pub type DefaultSize = typenum::U64;
+    } else {
+        compile_error!("unexpected target_pointer_width");
+    }
+}
 
 pub trait Sealed {}
 
@@ -47,33 +53,41 @@ pub struct SizeImplEven<U>(U, U);
 #[derive(Copy, Clone)]
 pub struct SizeImplOdd<U>(U, U, MaybeUninit<u8>);
 
+/// A marker trait for a [type-level unsigned integer](typenum::uint::UInt) representing a size.
 pub unsafe trait Size: Unsigned + Sealed {
     #[doc(hidden)]
-    type Output: Copy;
+    type Output: Copy + Unpin + Send + Sync;
 }
 
 unsafe impl Size for UTerm {
+    #[doc(hidden)]
     type Output = ();
 }
 
 unsafe impl<N: Size> Size for UInt<N, B0> {
+    #[doc(hidden)]
     type Output = SizeImplEven<N::Output>;
 }
 
 unsafe impl<N: Size> Size for UInt<N, B1> {
+    #[doc(hidden)]
     type Output = SizeImplOdd<N::Output>;
 }
 
+/// A marker trait for a [type-level unsigned integer](typenum::uint::UInt) representing an
+/// alignment.
 pub trait Align: Size {
     #[doc(hidden)]
-    type Output: Copy;
+    type Output: Copy + Unpin + Send + Sync;
 }
 
 impl Align for U0 {
+    #[doc(hidden)]
     type Output = ();
 }
 
 impl Align for U1 {
+    #[doc(hidden)]
     type Output = u8;
 }
 
@@ -82,6 +96,7 @@ impl Align for U1 {
 pub struct Aligned2(u8);
 
 impl Align for U2 {
+    #[doc(hidden)]
     type Output = Aligned2;
 }
 
@@ -90,6 +105,7 @@ impl Align for U2 {
 pub struct Aligned4(u8);
 
 impl Align for U4 {
+    #[doc(hidden)]
     type Output = Aligned4;
 }
 
@@ -98,6 +114,7 @@ impl Align for U4 {
 pub struct Aligned8(u8);
 
 impl Align for U8 {
+    #[doc(hidden)]
     type Output = Aligned8;
 }
 
@@ -106,6 +123,7 @@ impl Align for U8 {
 pub struct Aligned16(u8);
 
 impl Align for U16 {
+    #[doc(hidden)]
     type Output = Aligned16;
 }
 
@@ -114,6 +132,7 @@ impl Align for U16 {
 pub struct Aligned32(u8);
 
 impl Align for U32 {
+    #[doc(hidden)]
     type Output = Aligned32;
 }
 
@@ -122,6 +141,7 @@ impl Align for U32 {
 pub struct Aligned64(u8);
 
 impl Align for U64 {
+    #[doc(hidden)]
     type Output = Aligned64;
 }
 
@@ -144,6 +164,7 @@ pub(crate) union RawStorage<S: Size = DefaultSize, A: Align = S> {
 
 impl<S: Size, A: Align> RawStorage<S, A> {
     pub fn new() -> Self {
+        // SAFETY: `bytes` is an array of `MaybeUninit<u8>` which do not require initialization.
         unsafe {
             Self {
                 bytes: MaybeUninit::uninit().assume_init(),
@@ -152,10 +173,12 @@ impl<S: Size, A: Align> RawStorage<S, A> {
     }
 
     pub fn as_ptr(&self) -> *const MaybeUninit<u8> {
+        // SAFETY: `bytes` is the only variant that is used and is always initialized by new.
         unsafe { &self.bytes as *const _ as *const _ }
     }
 
     pub fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
+        // SAFETY: `bytes` is the only variant that is used and is always initialized by new.
         unsafe { &mut self.bytes as *mut _ as *mut _ }
     }
 }

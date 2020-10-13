@@ -5,6 +5,9 @@ edition = "2018"
 authors = ["John Schug <john.ips.schug@gmail.com>"]
 license = "MIT"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [badges]
 maintenance = { status = "experimental" }
 
@@ -16,3 +19,4 @@ std = ["alloc"]
 [dependencies]
 static_assertions = "1.1"
 typenum = "1.11"
+cfg-if = "1.0.0"
