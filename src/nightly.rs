@@ -60,7 +60,7 @@ where
     /// # Examples
     /// ```
     /// use core::mem;
-    /// use inline::fmt::InlineDynDebug;
+    /// use inline_dyn::fmt::InlineDynDebug;
     ///
     /// #[derive(Debug)]
     /// struct LargerThanBox([usize; 5]);

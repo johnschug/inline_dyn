@@ -61,7 +61,7 @@ impl<D: ?Sized> VTable<D> {
 ///
 /// # Examples
 /// ```
-/// use inline::fmt::InlineDynDebug;
+/// use inline_dyn::fmt::InlineDynDebug;
 ///
 /// let val: InlineDynDebug = InlineDynDebug::try_new(42u8).unwrap();
 /// assert_eq!(format!("{:?}", val), "42");
@@ -243,7 +243,7 @@ cfg_if! {
         /// # Examples
         /// ```
         /// use core::fmt::Debug;
-        /// use inline::{fmt::InlineDynDebug, inline_dyn};
+        /// use inline_dyn::{fmt::InlineDynDebug, inline_dyn};
         ///
         /// let val: InlineDynDebug = inline_dyn![Debug; 42usize].unwrap();
         /// assert_eq!(format!("{:?}", val), "42");
@@ -260,7 +260,7 @@ cfg_if! {
         /// # Examples
         /// ```
         /// use core::fmt::Debug;
-        /// use inline::{fmt::InlineDynDebug, inline_dyn_box};
+        /// use inline_dyn::{fmt::InlineDynDebug, inline_dyn_box};
         ///
         /// #[derive(Debug)]
         /// struct LargerThanBox([usize; 5]);

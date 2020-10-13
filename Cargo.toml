@@ -1,9 +1,13 @@
 [package]
-name = "inline"
+name = "inline_dyn"
 version = "0.1.0"
 edition = "2018"
 authors = ["John Schug <john.ips.schug@gmail.com>"]
-license = "MIT"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/johnschug/inline_dyn"
+categories = ["no-std", "rust-patterns"]
+keywords = ["container"]
+description = "A container type for storing dynamically-sized types inline"
 
 [package.metadata.docs.rs]
 all-features = true
