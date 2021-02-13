@@ -70,6 +70,7 @@ where
     /// assert_eq!(format!("{:?}", val.get_ref()), "LargerThanBox([1, 2, 3, 4, 5])");
     /// ```
     #[cfg(feature = "alloc")]
+    #[doc(cfg(feature = "alloc"))]
     pub fn try_or_box<T>(value: T) -> Self
     where
         T: Unsize<D> + 'a,

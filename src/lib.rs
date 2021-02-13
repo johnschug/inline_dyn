@@ -1,5 +1,5 @@
 #![cfg_attr(feature = "nightly", allow(incomplete_features))]
-#![cfg_attr(feature = "nightly", feature(unsize, const_generics))]
+#![cfg_attr(feature = "nightly", feature(unsize, const_generics, doc_cfg))]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -22,6 +22,7 @@ assert_impl_all!(InlineDyn<'static, dyn Debug + Sync>: Sync);
 assert_not_impl_any!(InlineDyn<'static, dyn Debug>: Unpin, Send, Sync);
 
 #[cfg(feature = "nightly")]
+#[doc(cfg(feature = "nightly"))]
 mod nightly;
 mod storage;
 
@@ -270,6 +271,7 @@ cfg_if! {
         /// ```
         #[macro_export]
         #[cfg(feature = "alloc")]
+        #[doc(cfg(feature = "alloc"))]
         macro_rules! inline_dyn_box {
             ($trait:path $(: $($_arg:ident),*)?; $e:expr) => {{
                 $crate::InlineDyn::<'_, dyn $trait>::try_or_box($e)
@@ -531,6 +533,7 @@ pub mod ops {
 
 cfg_if! {
     if #[cfg(feature = "std")] {
+        #[cfg_attr(feature = "nightly", doc(cfg(feature = "std")))]
         pub mod error {
             use std::error::Error;
 
@@ -561,6 +564,7 @@ cfg_if! {
             }
         }
 
+        #[cfg_attr(feature = "nightly", doc(cfg(feature = "std")))]
         pub mod io {
             use crate::{Align, DefaultSize, InlineDyn, Size};
             use std::io;
