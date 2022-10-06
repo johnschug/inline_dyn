@@ -1,5 +1,7 @@
-#![cfg_attr(feature = "nightly", allow(incomplete_features))]
-#![cfg_attr(feature = "nightly", feature(unsize, const_generics, doc_cfg))]
+#![cfg_attr(
+    feature = "nightly",
+    feature(unsize, coerce_unsized, doc_cfg, ptr_metadata)
+)]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -8,73 +10,85 @@ use core::{
     marker::PhantomData,
     mem::{self, ManuallyDrop},
     ops::{Deref, DerefMut},
+    pin::Pin,
     ptr,
 };
 
 use cfg_if::cfg_if;
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
+use self::pointee::Metadata;
 use self::storage::RawStorage;
 
-assert_impl_all!(InlineDyn<'static, dyn Debug + Unpin>: Unpin);
-assert_impl_all!(InlineDyn<'static, dyn Debug + Send>: Send);
-assert_impl_all!(InlineDyn<'static, dyn Debug + Sync>: Sync);
-assert_not_impl_any!(InlineDyn<'static, dyn Debug>: Unpin, Send, Sync);
+assert_impl_all!(InlineDyn<dyn Debug + Unpin>: Unpin);
+assert_impl_all!(InlineDyn<dyn Debug + Send>: Send);
+assert_impl_all!(InlineDyn<dyn Debug + Sync>: Sync);
+assert_not_impl_any!(InlineDyn<dyn Debug>: Unpin, Send, Sync);
 
 #[cfg(feature = "nightly")]
 #[doc(cfg(feature = "nightly"))]
 mod nightly;
+mod pointee;
 mod storage;
 
-pub use storage::{Align, Size};
+#[cfg(not(feature = "nightly"))]
+pub use pointee::Coerce;
+pub use storage::{Align, Alignment, DEFAULT_SIZE};
 
-/// A type-level integer corresponding to the default [size](Size) and [alignment](Align) of the
-/// internal storage of an [`InlineDyn`].
-///
-/// The value of this integer should be equivalent to the size of a pointer (in bytes).
-pub type DefaultSize = storage::DefaultSize;
+struct AssertSizeAlign<T, const SIZE: usize, const ALIGN: usize>(PhantomData<T>);
 
-#[doc(hidden)]
-pub unsafe trait Coerce<T, U: ?Sized> {
-    fn coerce(p: *const T) -> *const U;
+impl<T, const SIZE: usize, const ALIGN: usize> AssertSizeAlign<T, SIZE, ALIGN> {
+    const OK: () = assert!(
+        (mem::size_of::<T>() <= SIZE) && (mem::align_of::<T>() <= ALIGN),
+        "size and/or alignment insufficient to store value"
+    );
 }
 
-struct VTable<D: ?Sized> {
-    cast_ref: unsafe fn(*const ()) -> *const D,
-    cast_mut: unsafe fn(*mut ()) -> *mut D,
-}
+struct AssertGrow<const X: usize, const Y: usize>;
 
-impl<D: ?Sized> VTable<D> {
-    unsafe fn with_unsize<'a, C, T: 'a>() -> &'a Self
-    where C: Coerce<T, D> {
-        &Self {
-            cast_ref: |p| C::coerce(p.cast::<T>()),
-            cast_mut: |p| C::coerce(p.cast::<T>()) as *mut _,
-        }
-    }
+impl<const X: usize, const Y: usize> AssertGrow<X, Y> {
+    const OK: () = assert!(X >= Y, "new value must not be smaller than old");
 }
 
 /// A container type that stores a dynamically-sized type (e.g., a trait object) inline within the
 /// container.
 ///
 /// The `S` and `A` generic parameters specify the size and alignment (in bytes) of the internal
-/// storage.
+/// storage. The default size is the size of a pointer and the default alignment is equivalent to
+/// the size.
 ///
 /// # Examples
 /// ```
 /// use inline_dyn::fmt::InlineDynDebug;
 ///
-/// let val: InlineDynDebug = InlineDynDebug::try_new(42u8).unwrap();
+/// let val = <InlineDynDebug>::new(42u8);
 /// assert_eq!(format!("{:?}", val), "42");
 /// ```
-pub struct InlineDyn<'a, D: ?Sized + 'a, S: Size = DefaultSize, A: Align = S> {
-    // TODO: Replace with DynMetadata if RFC 2580 is accepted.
-    metadata: &'a VTable<D>,
+///
+/// Insufficient size:
+/// ```compile_fail
+/// # use inline_dyn::fmt::InlineDynDebug;
+/// let val = InlineDynDebug<1>::new(42u32);
+/// ```
+///
+/// Insufficient alignment:
+/// ```compile_fail
+/// # use inline_dyn::fmt::InlineDynDebug;
+/// let val = InlineDynDebug<4, 1>::new(42u32);
+/// ```
+pub struct InlineDyn<D: ?Sized, const S: usize = DEFAULT_SIZE, const A: usize = S>
+where
+    Align<A>: Alignment,
+{
+    metadata: Metadata<D>,
     storage: RawStorage<S, A>,
     _marker: PhantomData<D>,
 }
 
-impl<D: ?Sized, S: Size, A: Align> Drop for InlineDyn<'_, D, S, A> {
+impl<D: ?Sized, const S: usize, const A: usize> Drop for InlineDyn<D, S, A>
+where
+    Align<A>: Alignment,
+{
     fn drop(&mut self) {
         unsafe {
             (self.get_mut() as *mut D).drop_in_place();
@@ -82,68 +96,70 @@ impl<D: ?Sized, S: Size, A: Align> Drop for InlineDyn<'_, D, S, A> {
     }
 }
 
-impl<'a, D: ?Sized, S: Size, A: Align> InlineDyn<'a, D, S, A> {
+impl<D: ?Sized, const S: usize, const A: usize> InlineDyn<D, S, A>
+where
+    Align<A>: Alignment,
+{
     /// # Safety
     /// The caller must guarantee that the specified implementation of `Coerce` can be soundly used
-    /// to convert references to `value` to references to type `D`.
+    /// to coerce references to `value` to references to type `D`.
     #[doc(hidden)]
-    pub unsafe fn with_unsize<C, T: 'a>(value: T) -> Result<Self, T>
-    where C: Coerce<T, D> {
-        Self::with_metadata(VTable::with_unsize::<C, T>(), value)
+    #[cfg(not(feature = "nightly"))]
+    pub unsafe fn with_unsize<C, T>(value: T) -> Self
+    where
+        C: Coerce<T, D>,
+    {
+        let metadata = pointee::unsize::<C, _, T>();
+        Self::with_metadata(metadata, value)
     }
 
     /// # Safety
     /// The caller must guarantee that the provided metadata can be soundly used to convert
     /// references to `value` to references to type `D`.
-    unsafe fn with_metadata<T: 'a>(metadata: &'a VTable<D>, value: T) -> Result<Self, T> {
-        if (mem::size_of_val(&value) <= mem::size_of::<RawStorage<S, A>>())
-            && (mem::align_of_val(&value) <= mem::align_of::<RawStorage<S, A>>())
-        {
-            let mut storage = RawStorage::new();
-            storage.as_mut_ptr().cast::<T>().write(value);
-            Ok(Self {
-                metadata,
-                storage,
-                _marker: PhantomData,
-            })
-        } else {
-            Err(value)
+    unsafe fn with_metadata<T>(metadata: Metadata<D>, val: T) -> Self {
+        let () = AssertSizeAlign::<T, S, A>::OK;
+        let mut storage = RawStorage::new();
+        storage.as_mut_ptr().cast::<T>().write(val);
+        Self {
+            metadata,
+            storage,
+            _marker: PhantomData,
         }
     }
 
     /// Returns a shared reference to the stored value.
     pub fn get_ref(&self) -> &D {
         // SAFETY: the constructors for `InlineDyn` guarantee that storage is always initialized
-        // and that `self.metadata` has appropriate conversion functions for the stored value.
-        unsafe { &*(self.metadata.cast_ref)(self.storage.as_ptr().cast()) }
+        // and that `self.metadata` is appropriate for the stored value.
+        unsafe { &*pointee::from_raw_parts(self.storage.as_ptr().cast(), self.metadata) }
     }
 
     /// Returns a mutable reference to the stored value.
     pub fn get_mut(&mut self) -> &mut D {
         // SAFETY: same as `get_ref`.
-        unsafe { &mut *(self.metadata.cast_mut)(self.storage.as_mut_ptr().cast()) }
+        unsafe {
+            &mut *pointee::from_raw_parts_mut(self.storage.as_mut_ptr().cast(), self.metadata)
+        }
     }
 
-    /// Creates a new `InlineDyn` with a larger internal storage containing the value stored in
-    /// `this`.
-    pub fn grow<U, V>(this: Self) -> InlineDyn<'a, D, U, V>
-    where
-        U: Size + typenum::IsGreaterOrEqual<S>,
-        V: Align + typenum::IsGreaterOrEqual<A>, {
-        let (size, align) = {
-            let val = this.get_ref();
-            (mem::size_of_val(val), mem::align_of_val(val))
-        };
-        debug_assert!(size <= mem::size_of::<RawStorage<U, V>>());
-        debug_assert!(align <= mem::align_of::<RawStorage<U, V>>());
+    /// Returns a pinned reference to the stored value.
+    pub fn get_pinned_mut(self: Pin<&mut Self>) -> Pin<&mut D> {
+        // SAFETY: if `self` is pinned then the contained value is also pinned.
+        unsafe { self.map_unchecked_mut(|x| x.get_mut()) }
+    }
 
+    /// # Safety
+    /// The caller must guarantee that the layout of the resulting storage is compatible with
+    /// the contained value.
+    unsafe fn resize_unchecked<const U: usize, const V: usize>(this: Self) -> InlineDyn<D, U, V>
+    where
+        Align<V>: Alignment,
+    {
+        let size = mem::size_of_val(this.get_ref());
         let this = ManuallyDrop::new(this);
         let mut storage = RawStorage::<U, V>::new();
-        // SAFETY: the data is non-overlapping and the bounds for the function guarantee the layout
-        // is correct.
-        unsafe {
-            ptr::copy_nonoverlapping(this.storage.as_ptr(), storage.as_mut_ptr(), size);
-        }
+        // SAFETY: the data is non-overlapping and the layout is a precondition.
+        ptr::copy_nonoverlapping(this.storage.as_ptr(), storage.as_mut_ptr(), size);
         InlineDyn {
             metadata: this.metadata,
             storage,
@@ -151,67 +167,65 @@ impl<'a, D: ?Sized, S: Size, A: Align> InlineDyn<'a, D, S, A> {
         }
     }
 
-    /// Attempts to create a new `InlineDyn` with the given size and alignment for the internal
-    /// storage containing the value stored in `this`.
+    /// Attempts to move the value contained in `this` into a new `InlineDyn`
+    /// with the given size (`U`) and alignment (`V`).
     ///
     /// The size and alignment must be large enough to store the contained value, otherwise `this`
     /// is returned.
-    pub fn try_resize<U, V>(this: Self) -> Result<InlineDyn<'a, D, U, V>, Self>
+    ///
+    /// # Examples
+    /// ```
+    /// # use inline_dyn::fmt::InlineDynDisplay;
+    /// let val = InlineDynDisplay::new(42u8);
+    /// let val: InlineDynDisplay<1> = <InlineDynDisplay>::try_resize(val).ok().unwrap();
+    /// assert_eq!(val.to_string(), "42");
+    /// ```
+    ///
+    /// Insufficient size/alignment:
+    /// ```
+    /// # use inline_dyn::fmt::InlineDynDisplay;
+    /// let val = InlineDynDisplay::new(42u32);
+    /// let val: Result<InlineDynDisplay<1>, _> = <InlineDynDisplay>::try_resize(val);
+    /// assert!(val.is_err());
+    /// ```
+    pub fn try_resize<const U: usize, const V: usize>(
+        this: Self,
+    ) -> Result<InlineDyn<D, U, V>, Self>
     where
-        U: Size,
-        V: Align, {
+        Align<V>: Alignment,
+    {
         let (size, align) = {
             let val = this.get_ref();
             (mem::size_of_val(val), mem::align_of_val(val))
         };
-        if (size <= mem::size_of::<RawStorage<U, V>>())
-            && (align <= mem::align_of::<RawStorage<U, V>>())
-        {
-            let this = ManuallyDrop::new(this);
-            let mut storage = RawStorage::<U, V>::new();
-            // SAFETY: the data is non-overlapping and the layout has been checked.
-            unsafe {
-                ptr::copy_nonoverlapping(this.storage.as_ptr(), storage.as_mut_ptr(), size);
-            }
-            Ok(InlineDyn {
-                metadata: this.metadata,
-                storage,
-                _marker: PhantomData,
-            })
+        if (size <= U) && (align <= mem::align_of::<RawStorage<U, V>>()) {
+            // SAFETY: the size and alignment have been checked.
+            unsafe { Ok(Self::resize_unchecked(this)) }
         } else {
             Err(this)
         }
     }
 
-    // Requires RFC 2580 or some other way to soundly access DST metadata.
-    // #[cfg(feature = "alloc")]
-    // pub fn try_unbox(value: alloc::boxed::Box<D>) -> Result<Self, alloc::boxed::Box<D>> {
-    //     let (size, align) = {
-    //         (mem::size_of_val(&*value), mem::align_of_val(&*value))
-    //     };
-    //     if (size <= mem::size_of::<T>()) && (align <= mem::align_of::<T>()) {
-    //         let metadata = ptr::metadata(&*value);
-    //         let mut storage = RawStorage::<U, V>::new();
-    //         let value = ManuallyDrop::new(value); // TODO: fix memory leak here
-    //         unsafe {
-    //             ptr::copy_nonoverlapping(
-    //                 (&**value as *const D).cast::<MaybeUninit<u8>>(),
-    //                 storage.as_mut_ptr(),
-    //                 size,
-    //             );
-    //         }
-    //         Ok(Self {
-    //             metadata,
-    //             storage,
-    //             _marker: PhantomData,
-    //         })
-    //     } else {
-    //         Err(value)
-    //     }
-    // }
+    /// Moves the value contained in `this` into a new `InlineDyn` with the given size (`U`),
+    /// and alignment (`V`).
+    ///
+    /// The size and alignment must be at least as large as the current,
+    /// otherwise a compiler error is emitted.
+    pub fn grow<const U: usize, const V: usize>(this: Self) -> InlineDyn<D, U, V>
+    where
+        Align<V>: Alignment,
+    {
+        let () = AssertGrow::<U, S>::OK;
+        let () = AssertGrow::<V, A>::OK;
+        // SAFETY: the size and alignment have been checked.
+        unsafe { Self::resize_unchecked(this) }
+    }
 }
 
-impl<D: ?Sized, S: Size, A: Align> Deref for InlineDyn<'_, D, S, A> {
+impl<D: ?Sized, const S: usize, const A: usize> Deref for InlineDyn<D, S, A>
+where
+    Align<A>: Alignment,
+{
     type Target = D;
 
     fn deref(&self) -> &Self::Target {
@@ -219,70 +233,83 @@ impl<D: ?Sized, S: Size, A: Align> Deref for InlineDyn<'_, D, S, A> {
     }
 }
 
-impl<D: ?Sized, S: Size, A: Align> DerefMut for InlineDyn<'_, D, S, A> {
+impl<D: ?Sized, const S: usize, const A: usize> DerefMut for InlineDyn<D, S, A>
+where
+    Align<A>: Alignment,
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.get_mut()
     }
 }
 
-impl<D: Debug + ?Sized, S: Size, A: Align> Debug for InlineDyn<'_, D, S, A> {
+impl<D: Debug + ?Sized, const S: usize, const A: usize> Debug for InlineDyn<D, S, A>
+where
+    Align<A>: Alignment,
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Debug::fmt(self.get_ref(), f)
     }
 }
 
-impl<D: Display + ?Sized, S: Size, A: Align> Display for InlineDyn<'_, D, S, A> {
+impl<D: Display + ?Sized, const S: usize, const A: usize> Display for InlineDyn<D, S, A>
+where
+    Align<A>: Alignment,
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Display::fmt(self.get_ref(), f)
     }
 }
 
+#[macro_export]
+macro_rules! dyn_star {
+    ($($trait:path),+ $(,)?) => {
+        $crate::InlineDyn::<dyn ($($trait)*)>
+    };
+    ($($trait:path,)+ $l:lifetime $(,)?) => {
+        $crate::InlineDyn::<dyn $($trait)* + $l>
+    };
+}
+
 cfg_if! {
     if #[cfg(feature = "nightly")] {
-        /// Attempt to construct a new [`InlineDyn`] for the specified trait containing the given value.
+        /// Constructs a new `InlineDyn` containing the given value.
+        ///
+        /// The size and alignment of the internal storage must be large enough to
+        /// store the given value, otherwise a compiler error is emitted.
         ///
         /// # Examples
         /// ```
         /// use core::fmt::Debug;
         /// use inline_dyn::{fmt::InlineDynDebug, inline_dyn};
         ///
-        /// let val: InlineDynDebug = inline_dyn![Debug; 42usize].unwrap();
+        /// let val = inline_dyn![Debug; 42usize];
         /// assert_eq!(format!("{:?}", val), "42");
         /// ```
         #[macro_export]
         macro_rules! inline_dyn {
-            ($trait:path $(: $($_arg:ident),*)?; $e:expr) => {{
-                $crate::InlineDyn::<'_, dyn $trait, _, _>::try_new($e)
-            }};
+            ($trait:path $(: $($_arg:ident),*)?; $e:expr) => {
+                $crate::InlineDyn::<(dyn $trait + '_)>::new($e)
+            };
         }
-        /// Construct a new [`InlineDyn`] for the specified trait containing the given value if the value
-        /// can fit in the internal storage, or else box the value and store that.
+    } else {
+        /// Constructs a new `InlineDyn` containing the given value.
+        ///
+        /// The size and alignment of the internal storage must be large enough to
+        /// store the given value, otherwise a compiler error is emitted.
         ///
         /// # Examples
         /// ```
         /// use core::fmt::Debug;
-        /// use inline_dyn::{fmt::InlineDynDebug, inline_dyn_box};
+        /// use inline_dyn::{fmt::InlineDynDebug, inline_dyn};
         ///
-        /// #[derive(Debug)]
-        /// struct LargerThanBox([usize; 5]);
-        ///
-        /// let val: InlineDynDebug = inline_dyn_box![Debug; LargerThanBox([1, 2, 3, 4, 5])];
-        /// assert_eq!(format!("{:?}", val), "LargerThanBox([1, 2, 3, 4, 5])");
+        /// let val: InlineDynDebug = inline_dyn![Debug; 42usize];
+        /// assert_eq!(format!("{:?}", val), "42");
         /// ```
-        #[macro_export]
-        #[cfg(feature = "alloc")]
-        #[doc(cfg(feature = "alloc"))]
-        macro_rules! inline_dyn_box {
-            ($trait:path $(: $($_arg:ident),*)?; $e:expr) => {{
-                $crate::InlineDyn::<'_, dyn $trait>::try_or_box($e)
-            }};
-        }
-    } else {
         #[macro_export]
         macro_rules! inline_dyn {
             ($trait:path $(: $($arg:ident),*)?; $e:expr) => {{
-                fn try_build<'a, $($($arg,)*)* _T, _S, _A>(value: _T) -> Result<$crate::InlineDyn<'a, dyn $trait + 'a, _S, _A>, _T>
-                    where _T: $trait + 'a, _S: $crate::Size, _A: $crate::Align, {
+                fn try_build<'a, $($($arg,)*)* _T, const _S: usize, const _A: usize>(value: _T) -> $crate::InlineDyn<dyn $trait + 'a, _S, _A>
+                where _T: $trait + 'a, $crate::Align<_A>: $crate::Alignment, {
                         struct Unsize;
                         unsafe impl<'a, $($($arg,)*)* _T: $trait + 'a> $crate::Coerce<_T, (dyn $trait + 'a)> for Unsize {
                             fn coerce(p: *const _T) -> *const (dyn $trait + 'a) {
@@ -294,50 +321,51 @@ cfg_if! {
                             $crate::InlineDyn::with_unsize::<Unsize, _>(value)
                         }
                     }
-                try_build::<$($($arg,)*)* _, _, _>($e)
+                try_build($e)
             }};
         }
 
-        #[macro_export]
-        #[cfg(feature = "alloc")]
-        macro_rules! inline_dyn_box {
-            ($trait:path $(: $($arg:ident),*)?; $e:expr) => {{
-                fn build<'a, $($($arg,)*)* _T>(value: _T) -> $crate::InlineDyn<'a, dyn $trait + 'a>
-                    where _T: $trait + 'a, alloc::boxed::Box<_T>: $trait + 'a {
-                        struct Unsize;
-                        unsafe impl<'a, $($($arg,)*)* _T: $trait + 'a> $crate::Coerce<_T, (dyn $trait + 'a)> for Unsize {
-                            fn coerce(p: *const _T) -> *const (dyn $trait + 'a) {
-                                p
-                            }
-                        }
-
-                        unsafe {
-                            $crate::InlineDyn::with_unsize::<Unsize, _>(value)
-                                .or_else(|v| $crate::InlineDyn::with_unsize::<Unsize, _>(alloc::boxed::Box::new(v)))
-                                .ok()
-                                .expect("insufficient space for box")
-                        }
+        impl<T, const S: usize, const A: usize> InlineDyn<[T], S, A>
+        where
+            Align<A>: Alignment,
+        {
+            /// Constructs a new `InlineDyn` containing the given value.
+            ///
+            /// The size and alignment of the internal storage must be large
+            /// enough to store the given value, otherwise a compiler error is
+            /// emitted.
+            ///
+            /// # Examples
+            /// Insufficient size:
+            /// ```compile_fail
+            /// InlineDyn::<[u8], 2>::new([1, 2, 3, 4]);
+            /// ```
+            ///
+            /// Insufficient alignment:
+            /// ```compile_fail
+            /// InlineDyn::<[u32], 16, 2>::new([1, 2, 3, 4]);
+            /// ```
+            pub fn new<const N: usize>(value: [T; N]) -> Self {
+                struct Unsize;
+                unsafe impl<_T, const _N: usize> crate::Coerce<[_T; _N], [_T]> for Unsize {
+                    fn coerce(p: *const [_T; _N]) -> *const [_T] {
+                        p
                     }
-                build::<$($($arg,)*)* _>($e)
-            }};
+                }
+
+                unsafe { Self::with_unsize::<Unsize, _>(value) }
+            }
         }
     }
 }
 
-macro_rules! impl_try_new {
+macro_rules! impl_new {
     ($trait:path $(, $arg:ident)*) => {
         #[cfg(not(feature = "nightly"))]
-        impl<'a, _S: crate::Size, _A: crate::Align $(, $arg)*> crate::InlineDyn<'a, dyn $trait, _S, _A> {
-            pub fn try_new<_T: $trait + 'a>(value: _T) -> Result<Self, _T> {
+        impl<'a, const _S: usize, const _A: usize $(, $arg)*> $crate::InlineDyn<(dyn $trait + 'a), _S, _A>
+        where $crate::Align<_A>: $crate::Alignment {
+            pub fn new<_T: $trait + 'a>(value: _T) -> Self {
                 inline_dyn![$trait: $($arg),*; value]
-            }
-        }
-
-        #[cfg(all(not(feature = "nightly"), feature = "alloc"))]
-        impl<'a $(, $arg)*> crate::InlineDyn<'a, dyn $trait> {
-            pub fn try_or_box<_T: $trait + 'a>(value: _T) -> Self
-            where alloc::boxed::Box<_T>: $trait + 'a {
-                inline_dyn_box![$trait: $($arg),*; value]
             }
         }
     };
@@ -349,29 +377,31 @@ pub mod any {
         mem::ManuallyDrop,
     };
 
-    use crate::{Align, DefaultSize, Size};
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
 
-    pub type InlineDynAny<S = DefaultSize, A = S> = crate::InlineDyn<'static, dyn Any, S, A>;
+    pub type InlineDynAny<const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Any, S, A>;
 
     #[cfg(not(feature = "nightly"))]
-    impl<S: Size, A: Align> InlineDynAny<S, A> {
-        pub fn try_new<T: Any>(value: T) -> Result<Self, T> {
+    impl<const S: usize, const A: usize> InlineDynAny<S, A>
+    where
+        Align<A>: Alignment,
+    {
+        pub fn new<T: Any>(value: T) -> Self {
             inline_dyn![Any; value]
         }
     }
 
-    impl<D, S, A> crate::InlineDyn<'static, D, S, A>
+    impl<D, const S: usize, const A: usize> InlineDyn<D, S, A>
     where
         D: Any + ?Sized,
-        S: Size,
-        A: Align,
+        Align<A>: Alignment,
     {
         pub fn downcast<T: Any>(self) -> Result<T, Self> {
             if self.get_ref().type_id() == TypeId::of::<T>() {
                 let this = ManuallyDrop::new(self);
                 // SAFETY: the type id of the stored value has been checked so it is safe to cast
-                // and `self` has been wrapped in a `ManuallyDrop` and will not be freed so it is
-                // safe to read the value out of the pointer.
+                // and `self` has been wrapped in a `ManuallyDrop`.
                 unsafe { Ok((this.get_ref() as *const D).cast::<T>().read()) }
             } else {
                 Err(self)
@@ -381,77 +411,97 @@ pub mod any {
 }
 
 pub mod convert {
-    use crate::DefaultSize;
+    use crate::{InlineDyn, DEFAULT_SIZE};
 
-    pub type InlineDynAsRef<'a, U, S = DefaultSize, A = S> =
-        crate::InlineDyn<'a, dyn core::convert::AsRef<U>, S, A>;
-    pub type InlineDynAsMut<'a, U, S = DefaultSize, A = S> =
-        crate::InlineDyn<'a, dyn core::convert::AsMut<U>, S, A>;
+    pub type InlineDynAsRef<'a, U, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn core::convert::AsRef<U> + 'a, S, A>;
+    pub type InlineDynAsMut<'a, U, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn core::convert::AsMut<U> + 'a, S, A>;
 
-    impl_try_new!(AsRef<U>, U);
-    impl_try_new!(AsMut<U>, U);
+    impl_new!(AsRef<U>, U);
+    impl_new!(AsMut<U>, U);
 }
 
 pub mod fmt {
-    use crate::DefaultSize;
+    use crate::{InlineDyn, DEFAULT_SIZE};
 
-    pub type InlineDynDebug<'a, S = DefaultSize, A = S> =
-        crate::InlineDyn<'a, dyn core::fmt::Debug, S, A>;
-    pub type InlineDynDisplay<'a, S = DefaultSize, A = S> =
-        crate::InlineDyn<'a, dyn core::fmt::Display, S, A>;
+    pub type InlineDynDebug<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn core::fmt::Debug + 'a, S, A>;
+    pub type InlineDynDisplay<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn core::fmt::Display + 'a, S, A>;
 
-    impl_try_new!(core::fmt::Debug);
-    impl_try_new!(core::fmt::Display);
+    impl_new!(core::fmt::Debug);
+    impl_new!(core::fmt::Display);
 }
 
 pub mod future {
-    use crate::{Align, DefaultSize, InlineDyn, Size};
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
     use core::{
         future::Future,
         pin::Pin,
         task::{Context, Poll},
     };
 
-    pub type InlineDynFuture<'a, O, S = DefaultSize, A = S> =
-        InlineDyn<'a, dyn Future<Output = O>, S, A>;
+    pub type InlineDynFuture<'a, O, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Future<Output = O> + 'a, S, A>;
 
-    impl_try_new!(Future<Output = O>, O);
+    impl_new!(Future<Output = O>, O);
 
-    impl<F, S, A> Future for InlineDyn<'_, F, S, A>
+    impl<F, const S: usize, const A: usize> Future for InlineDyn<F, S, A>
     where
-        F: Future + Unpin + ?Sized,
-        S: Size,
-        A: Align,
+        F: Future + ?Sized,
+        Align<A>: Alignment,
     {
         type Output = F::Output;
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            Pin::new(self.get_mut()).poll(cx)
+            self.get_pinned_mut().poll(cx)
         }
     }
 }
 
 pub mod hash {
-    pub type InlineDynHasher<'a, S = crate::DefaultSize, A = S> =
-        crate::InlineDyn<'a, dyn core::hash::Hasher, S, A>;
+    use core::hash::Hasher;
+
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
+
+    pub type InlineDynHasher<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Hasher + 'a, S, A>;
+
+    impl<H, const S: usize, const A: usize> Hasher for InlineDyn<H, S, A>
+    where
+        H: Hasher + ?Sized,
+        Align<A>: Alignment,
+    {
+        fn write(&mut self, bytes: &[u8]) {
+            self.get_mut().write(bytes)
+        }
+
+        fn finish(&self) -> u64 {
+            self.get_ref().finish()
+        }
+    }
 }
 
 pub mod iter {
-    use crate::{Align, DefaultSize, InlineDyn, Size};
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
 
-    pub type InlineDynIterator<'a, I, S = DefaultSize, A = S> =
-        InlineDyn<'a, dyn Iterator<Item = I>, S, A>;
-    pub type InlineDynDoubleEndedIterator<'a, I, S = DefaultSize, A = S> =
-        InlineDyn<'a, dyn DoubleEndedIterator<Item = I>, S, A>;
+    pub type InlineDynIterator<'a, I, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Iterator<Item = I> + 'a, S, A>;
+    pub type InlineDynDoubleEndedIterator<
+        'a,
+        I,
+        const S: usize = DEFAULT_SIZE,
+        const A: usize = S,
+    > = InlineDyn<dyn DoubleEndedIterator<Item = I> + 'a, S, A>;
 
-    impl_try_new!(Iterator<Item = I>, I);
-    impl_try_new!(DoubleEndedIterator<Item = I>, I);
+    impl_new!(Iterator<Item = I>, I);
+    impl_new!(DoubleEndedIterator<Item = I>, I);
 
-    impl<I, S, A> Iterator for InlineDyn<'_, I, S, A>
+    impl<I, const S: usize, const A: usize> Iterator for InlineDyn<I, S, A>
     where
         I: Iterator + ?Sized,
-        S: Size,
-        A: Align,
+        Align<A>: Alignment,
     {
         type Item = I::Item;
 
@@ -468,11 +518,10 @@ pub mod iter {
         }
     }
 
-    impl<I, S, A> DoubleEndedIterator for InlineDyn<'_, I, S, A>
+    impl<I, const S: usize, const A: usize> DoubleEndedIterator for InlineDyn<I, S, A>
     where
         I: DoubleEndedIterator + ?Sized,
-        S: Size,
-        A: Align,
+        Align<A>: Alignment,
     {
         fn next_back(&mut self) -> Option<Self::Item> {
             self.get_mut().next_back()
@@ -483,22 +532,20 @@ pub mod iter {
         }
     }
 
-    impl<I, S, A> ExactSizeIterator for InlineDyn<'_, I, S, A>
+    impl<I, const S: usize, const A: usize> ExactSizeIterator for InlineDyn<I, S, A>
     where
         I: ExactSizeIterator + ?Sized,
-        S: Size,
-        A: Align,
+        Align<A>: Alignment,
     {
         fn len(&self) -> usize {
             self.get_ref().len()
         }
     }
 
-    impl<I, S, A> core::iter::FusedIterator for InlineDyn<'_, I, S, A>
+    impl<I, const S: usize, const A: usize> core::iter::FusedIterator for InlineDyn<I, S, A>
     where
         I: core::iter::FusedIterator + ?Sized,
-        S: Size,
-        A: Align,
+        Align<A>: Alignment,
     {
     }
 }
@@ -507,7 +554,7 @@ pub mod ops {
     #[macro_export]
     macro_rules! InlineDynFn {
         (($($Args:ty),*) $(-> $R:ty)?) => {
-            $crate::InlineDynFn!(($($Args),*) $(-> $R)?; $crate::DefaultSize)
+            $crate::InlineDynFn!(($($Args),*) $(-> $R)?; $crate::DEFAULT_SIZE)
         };
         (($($Args:ty),*) $(-> $R:ty)?; $S:ty) => {
             $crate::InlineDynFn!(($($Args),*) $(-> $R)?; $S, $S)
@@ -520,13 +567,13 @@ pub mod ops {
     #[macro_export]
     macro_rules! InlineDynFnMut {
         (($($Args:ty),*) $(-> $R:ty)?) => {
-            $crate::InlineDynFnMut!(($($Args),*) $(-> $R)?; $crate::DefaultSize)
+            $crate::InlineDynFnMut!(($($Args),*) $(-> $R)?; $crate::DEFAULT_SIZE)
         };
         (($($Args:ty),*) $(-> $R:ty)?; $S:ty) => {
-            $crate::InlineDyn<'_, dyn FnMut($($Args),*)$(-> $R)?, $S, $S>
+            $crate::InlineDyn<dyn FnMut($($Args),*)$(-> $R)?, $S, $S>
         };
         (($($Args:ty),*) $(-> $R:ty)?; $S:ty, $A:ty) => {
-            $crate::InlineDyn<'_, dyn FnMut($($Args),*)$(-> $R)?, $S, $A>
+            $crate::InlineDyn<dyn FnMut($($Args),*)$(-> $R)?, $S, $A>
         };
     }
 }
@@ -537,18 +584,17 @@ cfg_if! {
         pub mod error {
             use std::error::Error;
 
-            use crate::{Align, InlineDyn, Size};
+            use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
 
-            pub type InlineDynError<'a, S = crate::DefaultSize, A = S> = InlineDyn<'a, dyn Error, S, A>;
+            pub type InlineDynError<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> = InlineDyn<dyn Error + 'a, S, A>;
 
-            impl_try_new!(Error);
+            impl_new!(Error);
 
             #[allow(deprecated)]
-            impl<E, S, A> Error for InlineDyn<'_, E, S, A>
+            impl<E, const S: usize, const A: usize> Error for InlineDyn<E, S, A>
             where
                 E: Error + ?Sized,
-                S: Size,
-                A: Align,
+                Align<A>: Alignment,
             {
                 fn description(&self) -> &str {
                     self.get_ref().description()
@@ -566,24 +612,23 @@ cfg_if! {
 
         #[cfg_attr(feature = "nightly", doc(cfg(feature = "std")))]
         pub mod io {
-            use crate::{Align, DefaultSize, InlineDyn, Size};
+            use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
             use std::io;
 
-            pub type InlineDynRead<'a, S = DefaultSize, A = S> = InlineDyn<'a, dyn io::Read, S, A>;
-            pub type InlineDynWrite<'a, S = DefaultSize, A = S> = InlineDyn<'a, dyn io::Write, S, A>;
-            pub type InlineDynSeek<'a, S = DefaultSize, A = S> = InlineDyn<'a, dyn io::Seek, S, A>;
-            pub type InlineDynBufRead<'a, S = DefaultSize, A = S> = InlineDyn<'a, dyn io::BufRead, S, A>;
+            pub type InlineDynRead<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> = InlineDyn<dyn io::Read + 'a, S, A>;
+            pub type InlineDynWrite<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> = InlineDyn<dyn io::Write + 'a, S, A>;
+            pub type InlineDynSeek<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> = InlineDyn<dyn io::Seek + 'a, S, A>;
+            pub type InlineDynBufRead<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> = InlineDyn<dyn io::BufRead + 'a, S, A>;
 
-            impl_try_new!(io::Read);
-            impl_try_new!(io::Write);
-            impl_try_new!(io::Seek);
-            impl_try_new!(io::BufRead);
+            impl_new!(io::Read);
+            impl_new!(io::Write);
+            impl_new!(io::Seek);
+            impl_new!(io::BufRead);
 
-            impl<T, S, A> io::Read for InlineDyn<'_, T, S, A>
+            impl<T, const S: usize, const A: usize> io::Read for InlineDyn<T, S, A>
             where
                 T: io::Read + ?Sized,
-                S: Size,
-                A: Align,
+                Align<A>: Alignment,
             {
                 fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
                     self.get_mut().read(buf)
@@ -598,11 +643,10 @@ cfg_if! {
                 }
             }
 
-            impl<T, S, A> io::Write for InlineDyn<'_, T, S, A>
+            impl<T, const S: usize, const A: usize> io::Write for InlineDyn<T, S, A>
             where
                 T: io::Write + ?Sized,
-                S: Size,
-                A: Align,
+                Align<A>: Alignment,
             {
                 fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
                     self.get_mut().write(buf)
@@ -621,22 +665,20 @@ cfg_if! {
                 }
             }
 
-            impl<T, S, A> io::Seek for InlineDyn<'_, T, S, A>
+            impl<T, const S: usize, const A: usize> io::Seek for InlineDyn<T, S, A>
             where
                 T: io::Seek + ?Sized,
-                S: Size,
-                A: Align,
+                Align<A>: Alignment,
             {
                 fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
                     self.get_mut().seek(pos)
                 }
             }
 
-            impl<T, S, A> io::BufRead for InlineDyn<'_, T, S, A>
+            impl<T, const S: usize, const A: usize> io::BufRead for InlineDyn<T, S, A>
             where
                 T: io::BufRead + ?Sized,
-                S: Size,
-                A: Align,
+                Align<A>: Alignment,
             {
                 fn fill_buf(&mut self) -> io::Result<&[u8]> {
                     self.get_mut().fill_buf()
@@ -652,14 +694,12 @@ cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use typenum::{U0, U1, U4};
-
     use super::*;
-    use crate::fmt::{InlineDynDebug, InlineDynDisplay};
+    use crate::fmt::InlineDynDisplay;
 
     #[test]
     fn test_simple() {
-        let val: InlineDynDebug = InlineDynDebug::try_new(42usize).unwrap();
+        let val = <dyn_star!(Debug)>::new(42usize);
         assert_eq!(format!("{:?}", val.get_ref()), "42");
     }
 
@@ -676,56 +716,33 @@ mod tests {
 
         let mut dropped = false;
         {
-            let dbg: InlineDynDebug = InlineDynDebug::try_new(Dropper(&mut dropped)).unwrap();
+            let dbg = <dyn_star!(Debug, '_)>::new(Dropper(&mut dropped));
             assert_eq!(format!("{:?}", dbg), "Dropper(false)");
         }
         assert_eq!(dropped, true);
     }
 
     #[test]
-    fn test_size_insufficient() {
-        let res: Result<InlineDynDebug<U0>, _> = InlineDynDebug::try_new(42u8);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn test_alignment_insufficient() {
-        let res: Result<InlineDynDebug<U4, U1>, _> = InlineDynDebug::try_new(42u32);
-        assert!(res.is_err());
-    }
-
-    #[test]
     fn test_resize() {
-        let val: InlineDynDisplay = InlineDynDisplay::try_new(42u8).unwrap();
+        let val = <dyn_star!(Display)>::new(42u8);
         assert_eq!(val.to_string(), "42");
 
-        let val: InlineDynDisplay<U1> = InlineDynDisplay::try_resize(val).ok().unwrap();
+        let val: InlineDynDisplay<1> = <dyn_star!(Display)>::try_resize(val).ok().unwrap();
         assert_eq!(val.to_string(), "42");
     }
 
     #[test]
     fn test_resize_insufficient() {
-        let val: InlineDynDisplay = InlineDynDisplay::try_new(42u32).unwrap();
+        let val = <dyn_star!(Display)>::new(42u32);
         assert_eq!(val.to_string(), "42");
 
-        let res: Result<InlineDynDisplay<U1>, _> = InlineDynDisplay::try_resize(val);
+        let res: Result<InlineDynDisplay<1>, _> = <dyn_star!(Display)>::try_resize(val);
         assert!(res.is_err());
     }
 
     #[test]
-    #[cfg(feature = "alloc")]
-    fn test_try_or_box() {
-        use std::mem;
-
-        #[derive(Debug)]
-        struct LargerThanBox([usize; 5]);
-        assert!(mem::size_of::<LargerThanBox>() > mem::size_of::<InlineDynDebug>());
-
-        let val: InlineDynDebug = InlineDynDebug::try_or_box(LargerThanBox([1, 2, 3, 4, 5]));
-        assert!(mem::size_of_val(val.get_ref()) < mem::size_of::<LargerThanBox>());
-        assert_eq!(
-            format!("{:?}", val.get_ref()),
-            "LargerThanBox([1, 2, 3, 4, 5])"
-        );
+    fn test_slice() {
+        let val = InlineDyn::<[u8], 4>::new([1, 2, 3, 4]);
+        assert_eq!(val.get_ref(), [1, 2, 3, 4]);
     }
 }
