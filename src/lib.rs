@@ -694,6 +694,8 @@ cfg_if! {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+
     use super::*;
     use crate::fmt::InlineDynDisplay;
 
@@ -744,5 +746,27 @@ mod tests {
     fn test_slice() {
         let val = InlineDyn::<[u8], 4>::new([1, 2, 3, 4]);
         assert_eq!(val.get_ref(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_interior_mutability() {
+        trait Foo {
+            fn foo(&self) -> u32;
+        }
+
+        struct Bar(Cell<u32>);
+
+        impl Foo for Bar {
+            fn foo(&self) -> u32 {
+                let r = self.0.get();
+                self.0.set(r + 1);
+                r
+            }
+        }
+
+        let val: dyn_star!(Foo) = inline_dyn![Foo; Bar(Cell::new(0))];
+        assert_eq!(val.foo(), 0);
+        assert_eq!(val.foo(), 1);
+        assert_eq!(val.foo(), 2);
     }
 }

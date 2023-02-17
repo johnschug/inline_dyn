@@ -18,5 +18,5 @@ be dual licensed as above, without any additional terms or conditions.
 [crate]: https://crates.io/crates/inline_dyn
 [docs badge]: https://img.shields.io/badge/docs.rs-inline__dyn-yellow?style=flat-square
 [docs]: https://docs.rs/inline_dyn
-[build]: https://img.shields.io/github/workflow/status/johnschug/inline_dyn/CI/master?style=flat-square
+[build]: https://img.shields.io/github/actions/workflow/status/johnschug/inline_dyn/ci.yml?branch=master&style=flat-square
 [ci]: https://github.com/johnschug/inline_dyn/actions?query=branch%3Amaster

@@ -1,11 +1,8 @@
-name: CI
-on:
-  push:
-  pull_request:
-  schedule:
-    - cron: '0 0 1 * *'
+name: Continuous Integration
+on: [push, pull_request]
 jobs:
   test:
+    name: Test Suite (${{ matrix.os }}, rust-${{ matrix.rust }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -16,19 +13,14 @@ jobs:
             features: std
           - os: ubuntu-latest
             rust: nightly
-            features: nightly
-          - os: macos-latest
-            rust: stable
-            features: std
+            features: std,nightly
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
       - name: Install rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ matrix.rust }}
-          override: true
       - name: Build
         run: cargo build --verbose
       - name: Run tests
@@ -41,11 +33,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
       - name: Install rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          profile: minimal
-          toolchain: nightly
-          override: true
           components: miri
       - name: Run tests
         run: cargo miri test --verbose --no-default-features

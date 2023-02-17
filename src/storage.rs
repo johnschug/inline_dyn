@@ -1,4 +1,7 @@
-use core::mem::{self, MaybeUninit};
+use core::{
+    cell::UnsafeCell,
+    mem::{self, ManuallyDrop, MaybeUninit},
+};
 
 pub use elain::{Align, Alignment};
 
@@ -30,8 +33,13 @@ pub union RawStorage<const SIZE: usize = DEFAULT_SIZE, const ALIGN: usize = SIZE
 where
     Align<ALIGN>: Alignment,
 {
-    data: [MaybeUninit<u8>; SIZE],
+    data: ManuallyDrop<UnsafeCell<[MaybeUninit<u8>; SIZE]>>,
     _align: Align<ALIGN>,
+}
+
+unsafe impl<const SIZE: usize, const ALIGN: usize> Sync for RawStorage<SIZE, ALIGN> where
+    Align<ALIGN>: Alignment
+{
 }
 
 impl<const SIZE: usize, const ALIGN: usize> RawStorage<SIZE, ALIGN>
@@ -42,19 +50,19 @@ where
         // SAFETY: `data` is an array of `MaybeUninit<u8>` which do not require initialization.
         unsafe {
             Self {
-                data: MaybeUninit::uninit().assume_init(),
+                data: ManuallyDrop::new(UnsafeCell::new(MaybeUninit::uninit().assume_init())),
             }
         }
     }
 
-    pub const fn as_ptr(&self) -> *const MaybeUninit<u8> {
+    pub fn as_ptr(&self) -> *const MaybeUninit<u8> {
         // SAFETY: `data` is the only variant that is used and is always initialized by Self::new.
-        unsafe { &self.data as *const _ as *const _ }
+        unsafe { self.data.get().cast_const().cast() }
     }
 
     pub fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
         // SAFETY: `data` is the only variant that is used and is always initialized by Self::new.
-        unsafe { &mut self.data as *mut _ as *mut _ }
+        unsafe { self.data.get().cast() }
     }
 }
 
