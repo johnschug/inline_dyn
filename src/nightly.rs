@@ -48,8 +48,7 @@ where
     /// assert_eq!(val.get_ref(), &[0, 1, 2, 3]);
     /// ```
     #[cfg(feature = "alloc")]
-    #[doc(cfg(feature = "alloc"))]
-    pub fn try_unbox(value: alloc::boxed::Box<D>) -> Result<Self, alloc::boxed::Box<D>> {
+    pub fn try_unbox(value: std_alloc::boxed::Box<D>) -> Result<Self, std_alloc::boxed::Box<D>> {
         use core::{
             marker::PhantomData,
             mem::{self, ManuallyDrop, MaybeUninit},
@@ -63,7 +62,7 @@ where
             let metadata = ptr::metadata(&*value);
             let mut storage = RawStorage::<S, A>::new();
             unsafe {
-                let value: Box<ManuallyDrop<D>> = mem::transmute(value);
+                let value: std_alloc::boxed::Box<ManuallyDrop<D>> = mem::transmute(value);
                 ptr::copy_nonoverlapping(
                     (&**value as *const D).cast::<MaybeUninit<u8>>(),
                     storage.as_mut_ptr(),

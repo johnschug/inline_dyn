@@ -2,9 +2,10 @@
     feature = "nightly",
     feature(unsize, coerce_unsized, doc_cfg, ptr_metadata)
 )]
+#![cfg_attr(all(feature = "nightly", feature = "alloc"), feature(allocator_api))]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #[cfg(feature = "alloc")]
-extern crate alloc;
+extern crate alloc as std_alloc;
 use core::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     marker::PhantomData,
@@ -260,6 +261,67 @@ where
     }
 }
 
+/// A trait for cloning trait objects dynamically.
+///
+/// # Safety
+///
+/// An implementation must ensure that a valid value of the same type as the
+/// implementor is written to the storage passed to `dyn_clone_into`.
+///
+/// # Examples
+///
+/// ```
+/// use core::fmt::Display;
+/// use inline_dyn::{DynClone, dyn_star, inline_dyn};
+///
+/// trait DynValue: DynClone + Display {}
+/// impl<T: Clone + Display> DynValue for T {}
+///
+/// let val: dyn_star!(DynValue) = inline_dyn![5u8];
+/// let val2 = val.clone();
+/// assert_eq!(val2.to_string(), "5");
+/// ```
+pub unsafe trait DynClone {
+    fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]);
+}
+
+unsafe impl<T> crate::DynClone for T
+where
+    T: Clone,
+{
+    /// Writes a copy of the value into `storage`.
+    fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]) {
+        assert!(mem::size_of::<Self>() <= storage.len());
+        let this = (*self).clone();
+        unsafe {
+            storage.as_mut_ptr().cast::<T>().write(this);
+        }
+    }
+}
+
+impl<D: DynClone + ?Sized, const S: usize, const A: usize> Clone for InlineDyn<D, S, A>
+where
+    Align<A>: Alignment,
+{
+    fn clone(&self) -> Self {
+        use core::slice;
+
+        let mut storage = RawStorage::new();
+        // SAFETY: The implementation requirement for `DynClone` ensures a valid
+        // value of the same type as the current value is written to `storage`,
+        // so the metadata and storage layout are already known to be correct.
+        unsafe {
+            self.get_ref()
+                .dyn_clone_into(slice::from_raw_parts_mut(storage.as_mut_ptr(), S));
+            Self {
+                storage,
+                metadata: self.metadata,
+                _marker: PhantomData,
+            }
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! dyn_star {
     ($($trait:path),+ $(,)?) => {
@@ -362,6 +424,81 @@ macro_rules! impl_new {
             }
         }
     };
+}
+
+impl<T, const S: usize, const A: usize, const N: usize> TryFrom<InlineDyn<[T], S, A>> for [T; N]
+where
+    Align<A>: Alignment,
+{
+    type Error = InlineDyn<[T], S, A>;
+
+    fn try_from(value: InlineDyn<[T], S, A>) -> Result<Self, Self::Error> {
+        if value.len() != N {
+            return Err(value);
+        }
+        let value = ManuallyDrop::new(value);
+        // SAFETY: The value has been wrapped in a `ManuallyDrop` and
+        // the length of the slice has been checked.
+        unsafe { Ok(value.as_ptr().cast::<[T; N]>().read()) }
+    }
+}
+
+#[cfg(all(feature = "nightly", feature = "alloc"))]
+pub mod alloc {
+    use core::{
+        alloc::{AllocError, Allocator, Layout},
+        ptr::NonNull,
+    };
+
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
+
+    pub type InlineDynAllocator<const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Allocator, S, A>;
+
+    unsafe impl<D, const S: usize, const A: usize> Allocator for InlineDyn<D, S, A>
+    where
+        D: Allocator,
+        Align<A>: Alignment,
+    {
+        fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+            self.get_ref().allocate(layout)
+        }
+
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            self.get_ref().deallocate(ptr, layout)
+        }
+
+        fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+            self.get_ref().allocate_zeroed(layout)
+        }
+
+        unsafe fn grow(
+            &self,
+            ptr: NonNull<u8>,
+            old_layout: Layout,
+            new_layout: Layout,
+        ) -> Result<NonNull<[u8]>, AllocError> {
+            self.get_ref().grow(ptr, old_layout, new_layout)
+        }
+
+        unsafe fn grow_zeroed(
+            &self,
+            ptr: NonNull<u8>,
+            old_layout: Layout,
+            new_layout: Layout,
+        ) -> Result<NonNull<[u8]>, AllocError> {
+            self.get_ref().grow_zeroed(ptr, old_layout, new_layout)
+        }
+
+        unsafe fn shrink(
+            &self,
+            ptr: NonNull<u8>,
+            old_layout: Layout,
+            new_layout: Layout,
+        ) -> Result<NonNull<[u8]>, AllocError> {
+            self.get_ref().shrink(ptr, old_layout, new_layout)
+        }
+    }
 }
 
 pub mod any {
