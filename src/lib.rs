@@ -31,9 +31,7 @@ mod nightly;
 mod pointee;
 mod storage;
 
-#[cfg(not(feature = "nightly"))]
-pub use pointee::Coerce;
-pub use storage::{Align, Alignment, DEFAULT_SIZE};
+pub use storage::{Alignment, DEFAULT_SIZE};
 
 struct AssertSizeAlign<T, const SIZE: usize, const ALIGN: usize>(PhantomData<T>);
 
@@ -101,21 +99,18 @@ where
     Align<A>: Alignment,
 {
     /// # Safety
-    /// The caller must guarantee that the specified implementation of `Coerce` can be soundly used
-    /// to coerce references to `value` to references to type `D`.
+    /// The caller must guarantee that the provided function returns a pointer
+    /// to the specified value, which is a valid instance of type `D`.
     #[doc(hidden)]
     #[cfg(not(feature = "nightly"))]
-    pub unsafe fn with_unsize<C, T>(value: T) -> Self
-    where
-        C: Coerce<T, D>,
-    {
-        let metadata = pointee::unsize::<C, _, T>();
+    pub unsafe fn with_cast<T>(value: T, cast: fn(*const T) -> *const D) -> Self {
+        let metadata = Metadata::new(mem::transmute(cast));
         Self::with_metadata(metadata, value)
     }
 
     /// # Safety
-    /// The caller must guarantee that the provided metadata can be soundly used to convert
-    /// references to `value` to references to type `D`.
+    /// The caller must guarantee that the provided metadata can be soundly used
+    /// to convert references to `value` to references to type `D`.
     unsafe fn with_metadata<T>(metadata: Metadata<D>, val: T) -> Self {
         let () = AssertSizeAlign::<T, S, A>::OK;
         let mut storage = RawStorage::new();
@@ -277,56 +272,56 @@ macro_rules! dyn_star {
 
 cfg_if! {
     if #[cfg(feature = "nightly")] {
-        /// Constructs a new `InlineDyn` containing the given value.
+        /// Constructs a new [`InlineDyn`] containing the given value.
         ///
-        /// The size and alignment of the internal storage must be large enough to
-        /// store the given value, otherwise a compiler error is emitted.
+        /// The size and alignment of the internal storage must be large enough
+        /// to store the given value, otherwise a compiler error is emitted.
         ///
         /// # Examples
         /// ```
-        /// use core::fmt::Debug;
-        /// use inline_dyn::{fmt::InlineDynDebug, inline_dyn};
+        /// use inline_dyn::{fmt::InlineDynDisplay, inline_dyn};
         ///
-        /// let val = inline_dyn![Debug; 42usize];
-        /// assert_eq!(format!("{:?}", val), "42");
+        /// let val: InlineDynDisplay = inline_dyn![42usize];
+        /// assert_eq!(val.to_string(), "42");
+        /// ```
+        ///
+        /// Trait not implemented:
+        /// ```compile_fail
+        /// use inline_dyn::{hash::InlineDynHasher, inline_dyn};
+        /// let value: InlineDynHasher = inline_dyn![5u8];
         /// ```
         #[macro_export]
         macro_rules! inline_dyn {
-            ($trait:path $(: $($_arg:ident),*)?; $e:expr) => {
-                $crate::InlineDyn::<(dyn $trait + '_)>::new($e)
+            ($e:expr) => {
+                $crate::InlineDyn::new($e)
             };
         }
     } else {
-        /// Constructs a new `InlineDyn` containing the given value.
+        /// Constructs a new [`InlineDyn`] containing the given value.
         ///
         /// The size and alignment of the internal storage must be large enough to
         /// store the given value, otherwise a compiler error is emitted.
         ///
         /// # Examples
         /// ```
-        /// use core::fmt::Debug;
-        /// use inline_dyn::{fmt::InlineDynDebug, inline_dyn};
+        /// use inline_dyn::{fmt::InlineDynDisplay, inline_dyn};
         ///
-        /// let val: InlineDynDebug = inline_dyn![Debug; 42usize];
-        /// assert_eq!(format!("{:?}", val), "42");
+        /// let val: InlineDynDisplay = inline_dyn![42usize];
+        /// assert_eq!(val.to_string(), "42");
+        /// ```
+        ///
+        /// Trait not implemented:
+        /// ```compile_fail
+        /// use inline_dyn::{hash::InlineDynHasher, inline_dyn};
+        /// let value: InlineDynHasher = inline_dyn![5u8];
         /// ```
         #[macro_export]
         macro_rules! inline_dyn {
-            ($trait:path $(: $($arg:ident),*)?; $e:expr) => {{
-                fn try_build<'a, $($($arg,)*)* _T, const _S: usize, const _A: usize>(value: _T) -> $crate::InlineDyn<dyn $trait + 'a, _S, _A>
-                where _T: $trait + 'a, $crate::Align<_A>: $crate::Alignment, {
-                        struct Unsize;
-                        unsafe impl<'a, $($($arg,)*)* _T: $trait + 'a> $crate::Coerce<_T, (dyn $trait + 'a)> for Unsize {
-                            fn coerce(p: *const _T) -> *const (dyn $trait + 'a) {
-                                p
-                            }
-                        }
-
+            ($e:expr) => {{
+                let value = $e;
                         unsafe {
-                            $crate::InlineDyn::with_unsize::<Unsize, _>(value)
+                    $crate::InlineDyn::with_cast(value, |p| p)
                         }
-                    }
-                try_build($e)
             }};
         }
 
@@ -351,14 +346,7 @@ cfg_if! {
             /// InlineDyn::<[u32], 16, 2>::new([1, 2, 3, 4]);
             /// ```
             pub fn new<const N: usize>(value: [T; N]) -> Self {
-                struct Unsize;
-                unsafe impl<_T, const _N: usize> crate::Coerce<[_T; _N], [_T]> for Unsize {
-                    fn coerce(p: *const [_T; _N]) -> *const [_T] {
-                        p
-                    }
-                }
-
-                unsafe { Self::with_unsize::<Unsize, _>(value) }
+                unsafe { Self::with_cast(value, |p| p) }
             }
         }
     }
@@ -370,7 +358,7 @@ macro_rules! impl_new {
         impl<'a, const _S: usize, const _A: usize $(, $arg)*> $crate::InlineDyn<(dyn $trait + 'a), _S, _A>
         where $crate::Align<_A>: $crate::Alignment {
             pub fn new<_T: $trait + 'a>(value: _T) -> Self {
-                inline_dyn![$trait: $($arg),*; value]
+                inline_dyn![value]
             }
         }
     };
@@ -393,7 +381,7 @@ pub mod any {
         Align<A>: Alignment,
     {
         pub fn new<T: Any>(value: T) -> Self {
-            inline_dyn![Any; value]
+            inline_dyn![value]
         }
     }
 
@@ -472,6 +460,8 @@ pub mod hash {
 
     pub type InlineDynHasher<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
         InlineDyn<dyn Hasher + 'a, S, A>;
+
+    impl_new!(Hasher);
 
     impl<H, const S: usize, const A: usize> Hasher for InlineDyn<H, S, A>
     where
@@ -768,7 +758,7 @@ mod tests {
             }
         }
 
-        let val: dyn_star!(Foo) = inline_dyn![Foo; Bar(Cell::new(0))];
+        let val: dyn_star!(Foo) = inline_dyn![Bar(Cell::new(0))];
         assert_eq!(val.foo(), 0);
         assert_eq!(val.foo(), 1);
         assert_eq!(val.foo(), 2);
