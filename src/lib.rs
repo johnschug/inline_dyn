@@ -1,6 +1,6 @@
 #![cfg_attr(
     feature = "nightly",
-    feature(unsize, coerce_unsized, doc_cfg, ptr_metadata)
+    feature(unsize, coerce_unsized, doc_auto_cfg, ptr_metadata)
 )]
 #![cfg_attr(all(feature = "nightly", feature = "alloc"), feature(allocator_api))]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
@@ -9,7 +9,7 @@ extern crate alloc as std_alloc;
 use core::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     marker::PhantomData,
-    mem::{self, ManuallyDrop},
+    mem::{self, ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
     pin::Pin,
     ptr,
@@ -27,7 +27,6 @@ assert_impl_all!(InlineDyn<dyn Debug + Sync>: Sync);
 assert_not_impl_any!(InlineDyn<dyn Debug>: Unpin, Send, Sync);
 
 #[cfg(feature = "nightly")]
-#[doc(cfg(feature = "nightly"))]
 mod nightly;
 mod pointee;
 mod storage;
@@ -49,31 +48,31 @@ impl<const X: usize, const Y: usize> AssertGrow<X, Y> {
     const OK: () = assert!(X >= Y, "new value must not be smaller than old");
 }
 
-/// A container type that stores a dynamically-sized type (e.g., a trait object) inline within the
-/// container.
+/// A container type that stores a dynamically-sized type (e.g., a trait object)
+/// inline within the container.
 ///
-/// The `S` and `A` generic parameters specify the size and alignment (in bytes) of the internal
-/// storage. The default size is the size of a pointer and the default alignment is equivalent to
-/// the size.
+/// The `S` and `A` generic parameters specify the size and alignment (in bytes)
+/// of the internal storage. The default size is the size of a pointer and the
+/// alignment defaults to the specified size.
 ///
 /// # Examples
 /// ```
-/// use inline_dyn::fmt::InlineDynDebug;
+/// use inline_dyn::fmt::InlineDynDisplay;
 ///
-/// let val = <InlineDynDebug>::new(42u8);
-/// assert_eq!(format!("{:?}", val), "42");
+/// let val = <InlineDynDisplay>::new(42u8);
+/// assert_eq!(val.to_string(), "42");
 /// ```
 ///
 /// Insufficient size:
 /// ```compile_fail
-/// # use inline_dyn::fmt::InlineDynDebug;
-/// let val = InlineDynDebug<1>::new(42u32);
+/// # use inline_dyn::fmt::InlineDynDisplay;
+/// let val = InlineDynDisplay<1>::new(42u32);
 /// ```
 ///
 /// Insufficient alignment:
 /// ```compile_fail
-/// # use inline_dyn::fmt::InlineDynDebug;
-/// let val = InlineDynDebug<4, 1>::new(42u32);
+/// # use inline_dyn::fmt::InlineDynDisplay;
+/// let val = InlineDynDisplay<4, 1>::new(42u32);
 /// ```
 pub struct InlineDyn<D: ?Sized, const S: usize = DEFAULT_SIZE, const A: usize = S>
 where
@@ -125,8 +124,9 @@ where
 
     /// Returns a shared reference to the stored value.
     pub fn get_ref(&self) -> &D {
-        // SAFETY: the constructors for `InlineDyn` guarantee that storage is always initialized
-        // and that `self.metadata` is appropriate for the stored value.
+        // SAFETY: the constructors for `InlineDyn` guarantee that storage is
+        // always initialized and that `self.metadata` is appropriate for the
+        // stored value.
         unsafe { &*pointee::from_raw_parts(self.storage.as_ptr().cast(), self.metadata) }
     }
 
@@ -145,8 +145,8 @@ where
     }
 
     /// # Safety
-    /// The caller must guarantee that the layout of the resulting storage is compatible with
-    /// the contained value.
+    /// The caller must guarantee that the layout of the resulting storage is
+    /// compatible with the contained value.
     unsafe fn resize_unchecked<const U: usize, const V: usize>(this: Self) -> InlineDyn<D, U, V>
     where
         Align<V>: Alignment,
@@ -163,11 +163,11 @@ where
         }
     }
 
-    /// Attempts to move the value contained in `this` into a new `InlineDyn`
+    /// Attempts to move the value contained in `this` into a new [`InlineDyn`]
     /// with the given size (`U`) and alignment (`V`).
     ///
-    /// The size and alignment must be large enough to store the contained value, otherwise `this`
-    /// is returned.
+    /// The size and alignment must be large enough to store the contained
+    /// value, otherwise `this` is returned.
     ///
     /// # Examples
     /// ```
@@ -202,8 +202,8 @@ where
         }
     }
 
-    /// Moves the value contained in `this` into a new `InlineDyn` with the given size (`U`),
-    /// and alignment (`V`).
+    /// Moves the value contained in `this` into a new [`InlineDyn`] with the
+    /// given size (`U`), and alignment (`V`).
     ///
     /// The size and alignment must be at least as large as the current,
     /// otherwise a compiler error is emitted.
@@ -322,6 +322,13 @@ where
     }
 }
 
+/// A convenience macro that allows for using similar syntax to the proposed
+/// [`dyn* Trait`] feature.
+///
+/// It can be used as a type alias for an [`InlineDyn`] of the specified trait
+/// with pointer sized storage.
+///
+/// [`dyn* Trait`]: https://github.com/rust-lang/rust/issues/102425
 #[macro_export]
 macro_rules! dyn_star {
     ($($trait:path),+ $(,)?) => {
@@ -381,9 +388,9 @@ cfg_if! {
         macro_rules! inline_dyn {
             ($e:expr) => {{
                 let value = $e;
-                        unsafe {
+                unsafe {
                     $crate::InlineDyn::with_cast(value, |p| p)
-                        }
+                }
             }};
         }
 
@@ -391,7 +398,7 @@ cfg_if! {
         where
             Align<A>: Alignment,
         {
-            /// Constructs a new `InlineDyn` containing the given value.
+            /// Constructs a new [`InlineDyn`] containing the given value.
             ///
             /// The size and alignment of the internal storage must be large
             /// enough to store the given value, otherwise a compiler error is
@@ -712,7 +719,6 @@ pub mod ops {
 
 cfg_if! {
     if #[cfg(feature = "std")] {
-        #[cfg_attr(feature = "nightly", doc(cfg(feature = "std")))]
         pub mod error {
             use std::error::Error;
 
@@ -742,7 +748,6 @@ cfg_if! {
             }
         }
 
-        #[cfg_attr(feature = "nightly", doc(cfg(feature = "std")))]
         pub mod io {
             use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
             use std::io;
@@ -833,7 +838,7 @@ mod tests {
     #[test]
     fn test_simple() {
         let val = <dyn_star!(Debug)>::new(42usize);
-        assert_eq!(format!("{:?}", val.get_ref()), "42");
+        assert_eq!(format!("{val:?}"), "42");
     }
 
     #[test]
@@ -850,7 +855,7 @@ mod tests {
         let mut dropped = false;
         {
             let dbg = <dyn_star!(Debug, '_)>::new(Dropper(&mut dropped));
-            assert_eq!(format!("{:?}", dbg), "Dropper(false)");
+            assert_eq!(format!("{dbg:?}"), "Dropper(false)");
         }
         assert_eq!(dropped, true);
     }

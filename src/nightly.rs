@@ -7,7 +7,7 @@ where
     D: ?Sized,
     Align<A>: Alignment,
 {
-    /// Constructs a new `InlineDyn` containing the given value.
+    /// Constructs a new [`InlineDyn`] containing the given value.
     ///
     /// The size and alignment of the internal storage must be large enough to
     /// store the given value, otherwise a compiler error is emitted.
@@ -19,10 +19,10 @@ where
     ///
     /// # Examples
     /// ```
-    /// use inline_dyn::fmt::InlineDynDebug;
+    /// use inline_dyn::fmt::InlineDynDisplay;
     ///
-    /// let val = <InlineDynDebug>::new(42usize);
-    /// assert_eq!(format!("{:?}", val), "42");
+    /// let val = <InlineDynDisplay>::new(42usize);
+    /// assert_eq!(val.to_string(), "42");
     /// ```
     pub fn new<T>(value: T) -> Self
     where
@@ -35,7 +35,7 @@ where
         unsafe { Self::with_metadata(metadata, value) }
     }
 
-    /// Attempts to contruct a new `InlineDyn` by unboxing the given value.
+    /// Attempts to contruct a new [`InlineDyn`] by unboxing the given value.
     ///
     /// The size and alignment of the internal storage must be large enough to
     /// store the given value, otherwise the boxed value is returned.
