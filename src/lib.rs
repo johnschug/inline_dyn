@@ -18,7 +18,7 @@ use cfg_if::cfg_if;
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
 use self::pointee::Metadata;
-use self::storage::RawStorage;
+use self::storage::{Align, RawStorage};
 
 assert_impl_all!(InlineDyn<dyn Debug + Unpin>: Unpin);
 assert_impl_all!(InlineDyn<dyn Debug + Send>: Send);
@@ -220,6 +220,11 @@ where
         // SAFETY: the size and alignment have been checked.
         unsafe { Self::resize_unchecked(this) }
     }
+}
+
+impl<D: Unpin + ?Sized, const S: usize, const A: usize> Unpin for InlineDyn<D, S, A> where
+    Align<A>: Alignment
+{
 }
 
 impl<D: ?Sized, const S: usize, const A: usize> Deref for InlineDyn<D, S, A>
@@ -696,8 +701,7 @@ cfg_if! {
 mod tests {
     use core::cell::Cell;
 
-    use super::*;
-    use crate::fmt::InlineDynDisplay;
+    use super::{fmt::InlineDynDisplay, *};
 
     #[test]
     fn test_simple() {
@@ -768,5 +772,73 @@ mod tests {
         assert_eq!(val.foo(), 0);
         assert_eq!(val.foo(), 1);
         assert_eq!(val.foo(), 2);
+    }
+
+    macro_rules! assert_matches {
+        ($left:expr, $(|)? $($pattern:pat_param)|+ $(if $guard:expr)? $(,)?) => {
+            match $left {
+                $($pattern)|+ $(if $guard)? => {}
+                ref left_val => {
+                    panic!(r#"assertion failed: `(left matches right)`
+                     left: `{left_val:?}`
+                    right: `{}`"#, stringify!($($pattern)|+ $(if $guard)?))
+                }
+            }
+        };
+    }
+
+    #[test]
+    fn test_not_unpin() {
+        use super::future::InlineDynFuture;
+        use core::{
+            future::{poll_fn, Future},
+            pin::pin,
+            ptr,
+            task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+        };
+
+        struct NoopWaker;
+
+        impl From<NoopWaker> for RawWaker {
+            fn from(_: NoopWaker) -> Self {
+                RawWaker::new(
+                    ptr::null(),
+                    &RawWakerVTable::new(|_| NoopWaker.into(), |_| (), |_| (), |_| ()),
+                )
+            }
+        }
+
+        impl From<NoopWaker> for Waker {
+            fn from(value: NoopWaker) -> Self {
+                unsafe { Waker::from_raw(value.into()) }
+            }
+        }
+
+        async fn delay(mut amt: usize) {
+            let amt = &mut amt; // ensure returned future is self-referential
+            poll_fn(|cx| {
+                cx.waker().wake_by_ref();
+                match amt {
+                    0 => return Poll::Ready(()),
+                    _ => {
+                        *amt -= 1;
+                        return Poll::Pending;
+                    }
+                }
+            })
+            .await
+        }
+
+        let waker = Waker::from(NoopWaker);
+        let mut cx = Context::from_waker(&waker);
+        // 1KiB should be enough for anybody
+        let mut fut = pin!(<InlineDynFuture<u32, 1024, 16>>::new(async {
+            delay(3).await;
+            42
+        }));
+        assert_matches!(fut.as_mut().poll(&mut cx), Poll::Pending);
+        assert_matches!(fut.as_mut().poll(&mut cx), Poll::Pending);
+        assert_matches!(fut.as_mut().poll(&mut cx), Poll::Pending);
+        assert_matches!(fut.as_mut().poll(&mut cx), Poll::Ready(42));
     }
 }

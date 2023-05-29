@@ -1,5 +1,6 @@
 use core::{
     cell::UnsafeCell,
+    marker::PhantomPinned,
     mem::{self, ManuallyDrop, MaybeUninit},
 };
 
@@ -33,8 +34,13 @@ pub union RawStorage<const SIZE: usize = DEFAULT_SIZE, const ALIGN: usize = SIZE
 where
     Align<ALIGN>: Alignment,
 {
+    // The `UnsafeCell` here is needed to ensure soundness when storing values that allow
+    // interior mutability.
     data: ManuallyDrop<UnsafeCell<[MaybeUninit<u8>; SIZE]>>,
     _align: Align<ALIGN>,
+    // This makes `RawStorage: !Unpin` and is needed to ensure soundness when storing values
+    // that are `!Unpin`.
+    _pin: PhantomPinned,
 }
 
 unsafe impl<const SIZE: usize, const ALIGN: usize> Sync for RawStorage<SIZE, ALIGN> where
@@ -48,10 +54,10 @@ where
 {
     pub const fn new() -> Self {
         // SAFETY: `data` is an array of `MaybeUninit<u8>` which do not require initialization.
-        unsafe {
-            Self {
-                data: ManuallyDrop::new(UnsafeCell::new(MaybeUninit::uninit().assume_init())),
-            }
+        Self {
+            data: ManuallyDrop::new(UnsafeCell::new(unsafe {
+                MaybeUninit::uninit().assume_init()
+            })),
         }
     }
 
