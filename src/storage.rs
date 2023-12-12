@@ -30,7 +30,7 @@ const _: () = {
 pub const DEFAULT_SIZE: usize = mem::size_of::<*const u8>();
 
 #[repr(C)]
-pub union RawStorage<const SIZE: usize = DEFAULT_SIZE, const ALIGN: usize = SIZE>
+pub(crate) union RawStorage<const SIZE: usize = DEFAULT_SIZE, const ALIGN: usize = SIZE>
 where
     Align<ALIGN>: Alignment,
 {
@@ -52,7 +52,12 @@ impl<const SIZE: usize, const ALIGN: usize> RawStorage<SIZE, ALIGN>
 where
     Align<ALIGN>: Alignment,
 {
-    pub const fn new() -> Self {
+    pub(crate) fn is_layout_compatible<T: ?Sized>(val: &T) -> bool {
+        (mem::size_of_val(val) <= mem::size_of::<Self>())
+            && (mem::align_of_val(val) <= mem::align_of::<Self>())
+    }
+
+    pub(crate) const fn new() -> Self {
         // SAFETY: `data` is an array of `MaybeUninit<u8>` which do not require initialization.
         Self {
             data: ManuallyDrop::new(UnsafeCell::new(unsafe {
@@ -61,13 +66,13 @@ where
         }
     }
 
-    pub fn as_ptr(&self) -> *const MaybeUninit<u8> {
-        // SAFETY: `data` is the only variant that is used and is always initialized by Self::new.
+    pub(crate) fn as_ptr(&self) -> *const MaybeUninit<u8> {
+        // SAFETY: `data` is the only variant that is used and is always initialized by `Self::new()`.
         unsafe { self.data.get().cast_const().cast() }
     }
 
-    pub fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
-        // SAFETY: `data` is the only variant that is used and is always initialized by Self::new.
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
+        // SAFETY: `data` is the only variant that is used and is always initialized by `Self::new()`.
         unsafe { self.data.get().cast() }
     }
 }

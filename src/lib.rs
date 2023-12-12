@@ -1,3 +1,5 @@
+//! InlineDyn
+#![allow(clippy::let_unit_value)]
 #![cfg_attr(
     feature = "nightly",
     feature(unsize, coerce_unsized, doc_auto_cfg, ptr_metadata)
@@ -8,6 +10,7 @@
 extern crate alloc as std_alloc;
 use core::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
+    iter::FusedIterator,
     marker::PhantomData,
     mem::{self, ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
@@ -19,7 +22,7 @@ use cfg_if::cfg_if;
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
 use self::pointee::Metadata;
-use self::storage::{Align, RawStorage};
+use self::storage::RawStorage;
 
 assert_impl_all!(InlineDyn<dyn Debug + Unpin>: Unpin);
 assert_impl_all!(InlineDyn<dyn Debug + Send>: Send);
@@ -31,20 +34,20 @@ mod nightly;
 mod pointee;
 mod storage;
 
-pub use storage::{Alignment, DEFAULT_SIZE};
+pub use storage::{Align, Alignment, DEFAULT_SIZE};
 
-struct AssertSizeAlign<T, const SIZE: usize, const ALIGN: usize>(PhantomData<T>);
+struct AssertLayoutCompatible<T, const SIZE: usize, const ALIGN: usize>(PhantomData<T>);
 
-impl<T, const SIZE: usize, const ALIGN: usize> AssertSizeAlign<T, SIZE, ALIGN> {
+impl<T, const SIZE: usize, const ALIGN: usize> AssertLayoutCompatible<T, SIZE, ALIGN> {
     const OK: () = assert!(
         (mem::size_of::<T>() <= SIZE) && (mem::align_of::<T>() <= ALIGN),
         "size and/or alignment insufficient to store value"
     );
 }
 
-struct AssertGrow<const X: usize, const Y: usize>;
+struct AssertLarger<const X: usize, const Y: usize>;
 
-impl<const X: usize, const Y: usize> AssertGrow<X, Y> {
+impl<const X: usize, const Y: usize> AssertLarger<X, Y> {
     const OK: () = assert!(X >= Y, "new value must not be smaller than old");
 }
 
@@ -104,17 +107,54 @@ where
     #[doc(hidden)]
     #[cfg(not(feature = "nightly"))]
     pub unsafe fn with_cast<T>(value: T, cast: fn(*const T) -> *const D) -> Self {
-        let metadata = Metadata::new(mem::transmute(cast));
-        Self::with_metadata(metadata, value)
+        let metadata = Metadata::new(unsafe { mem::transmute(cast) });
+        unsafe { Self::with_metadata(metadata, value) }
+    }
+
+    /// # Safety
+    /// The caller must guarantee that the provided function returns a pointer
+    /// to the specified value, which is a valid instance of type `D`.
+    #[doc(hidden)]
+    #[cfg(not(feature = "nightly"))]
+    pub unsafe fn try_with_cast<T>(value: T, cast: fn(*const T) -> *const D) -> Result<Self, T> {
+        let metadata = Metadata::new(unsafe { mem::transmute(cast) });
+        unsafe { Self::try_with_metadata(metadata, value) }
     }
 
     /// # Safety
     /// The caller must guarantee that the provided metadata can be soundly used
     /// to convert references to `value` to references to type `D`.
     unsafe fn with_metadata<T>(metadata: Metadata<D>, val: T) -> Self {
-        let () = AssertSizeAlign::<T, S, A>::OK;
+        let () = AssertLayoutCompatible::<T, S, A>::OK;
+        // SAFETY: the layout has been checked and the validity of the metadata
+        // is a precondition of the function.
+        unsafe { Self::with_metadata_unchecked(metadata, val) }
+    }
+
+    /// # Safety
+    /// The caller must guarantee that the provided metadata can be soundly used
+    /// to convert references to `value` to references to type `D`.
+    unsafe fn try_with_metadata<T>(metadata: Metadata<D>, val: T) -> Result<Self, T> {
+        if RawStorage::<S, A>::is_layout_compatible::<T>(&val) {
+            // SAFETY: the layout has been checked and the validity of the metadata
+            // is a precondition of the function.
+            unsafe { Ok(Self::with_metadata_unchecked(metadata, val)) }
+        } else {
+            Err(val)
+        }
+    }
+
+    /// # Safety
+    /// The caller must guarantee that the provided metadata can be soundly used
+    /// to convert references to `value` to references to type `D` and that
+    /// the internal storage is layout compatiple with type `T`.
+    unsafe fn with_metadata_unchecked<T>(metadata: Metadata<D>, val: T) -> Self {
         let mut storage = RawStorage::new();
-        storage.as_mut_ptr().cast::<T>().write(val);
+        // SAFETY: the layout of the storage being sufficient to write a
+        // value of type `T` to is a precondition of the function.
+        unsafe {
+            storage.as_mut_ptr().cast::<T>().write(val);
+        }
         Self {
             metadata,
             storage,
@@ -155,7 +195,11 @@ where
         let this = ManuallyDrop::new(this);
         let mut storage = RawStorage::<U, V>::new();
         // SAFETY: the data is non-overlapping and the layout is a precondition.
-        ptr::copy_nonoverlapping(this.storage.as_ptr(), storage.as_mut_ptr(), size);
+        unsafe {
+            this.storage
+                .as_ptr()
+                .copy_to_nonoverlapping(storage.as_mut_ptr(), size);
+        }
         InlineDyn {
             metadata: this.metadata,
             storage,
@@ -190,12 +234,8 @@ where
     where
         Align<V>: Alignment,
     {
-        let (size, align) = {
-            let val = this.get_ref();
-            (mem::size_of_val(val), mem::align_of_val(val))
-        };
-        if (size <= U) && (align <= mem::align_of::<RawStorage<U, V>>()) {
-            // SAFETY: the size and alignment have been checked.
+        if RawStorage::<U, V>::is_layout_compatible::<D>(this.get_ref()) {
+            // SAFETY: the layout has been checked.
             unsafe { Ok(Self::resize_unchecked(this)) }
         } else {
             Err(this)
@@ -211,8 +251,8 @@ where
     where
         Align<V>: Alignment,
     {
-        let () = AssertGrow::<U, S>::OK;
-        let () = AssertGrow::<V, A>::OK;
+        let () = AssertLarger::<U, S>::OK;
+        let () = AssertLarger::<V, A>::OK;
         // SAFETY: the size and alignment have been checked.
         unsafe { Self::resize_unchecked(this) }
     }
@@ -282,6 +322,7 @@ where
 /// assert_eq!(val2.to_string(), "5");
 /// ```
 pub unsafe trait DynClone {
+    #[doc(hidden)]
     fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]);
 }
 
@@ -365,6 +406,20 @@ cfg_if! {
                 $crate::InlineDyn::new($e)
             };
         }
+        #[macro_export]
+        macro_rules! inline_dyn_try {
+            ($e:expr) => {
+                $crate::InlineDyn::try_new($e)
+            };
+        }
+
+        #[cfg(feature = "alloc")]
+        #[macro_export]
+        macro_rules! inline_dyn_box {
+            ($e:expr) => {
+                $crate::InlineDyn::try_or_box($e)
+            };
+        }
     } else {
         /// Constructs a new [`InlineDyn`] containing the given value.
         ///
@@ -388,9 +443,31 @@ cfg_if! {
         macro_rules! inline_dyn {
             ($e:expr) => {{
                 let value = $e;
+                // SAFETY: the lambda acts as witness that the type of the value
+                // is coercible to the target type.
                 unsafe {
                     $crate::InlineDyn::with_cast(value, |p| p)
                 }
+            }};
+        }
+
+        #[macro_export]
+        macro_rules! inline_dyn_try {
+            ($e:expr) => {{
+                let value = $e;
+                // SAFETY: the lambda acts as witness that the type of the value
+                // is coercible to the target type.
+                unsafe {
+                    $crate::InlineDyn::try_with_cast(value, |p| p)
+                }
+            }};
+        }
+
+        #[cfg(feature = "alloc")]
+        #[macro_export]
+        macro_rules! inline_dyn_box {
+            ($e:expr) => {{
+                $crate::inline_dyn_try!($e).unwrap_or_else(|v| $crate::inline_dyn!(Box::new(v)))
             }};
         }
 
@@ -427,7 +504,17 @@ macro_rules! impl_new {
         impl<'a, const _S: usize, const _A: usize $(, $arg)*> $crate::InlineDyn<(dyn $trait + 'a), _S, _A>
         where $crate::Align<_A>: $crate::Alignment {
             pub fn new<_T: $trait + 'a>(value: _T) -> Self {
-                inline_dyn![value]
+                inline_dyn!(value)
+            }
+
+            pub fn try_new<_T: $trait + 'a>(value: _T) -> Result<Self, _T> {
+                inline_dyn_try!(value)
+            }
+
+            #[cfg(feature = "alloc")]
+            pub fn try_or_box<_T>(value: _T) -> Self
+            where _T: $trait + 'a, std_alloc::boxed::Box<_T>: $trait + 'a, {
+                Self::try_new(value).unwrap_or_else(|v| Self::new(std_alloc::boxed::Box::new(value)))
             }
         }
     };
@@ -449,6 +536,82 @@ where
         unsafe { Ok(value.as_ptr().cast::<[T; N]>().read()) }
     }
 }
+
+// impl<T, const S: usize, const A: usize> IntoIterator for InlineDyn<[T], S, A>
+// where
+//     Align<A>: Alignment,
+// {
+//     type Item = T;
+//     type IntoIter = IntoIter<T, S, A>;
+
+//     fn into_iter(self) -> Self::IntoIter {
+//         IntoIter {
+//             storage: ManuallyDrop::new(self),
+//             pos: 0,
+//         }
+//     }
+// }
+
+pub struct IntoIter<T, const S: usize, const A: usize>
+where
+    Align<A>: Alignment,
+{
+    storage: ManuallyDrop<InlineDyn<[T], S, A>>,
+    pos: usize,
+}
+
+impl<T, const S: usize, const A: usize> Drop for IntoIter<T, S, A>
+where
+    Align<A>: Alignment,
+{
+    fn drop(&mut self) {
+        unsafe {
+            ptr::drop_in_place(&mut self.storage[self.pos..]);
+        }
+    }
+}
+
+impl<T, const S: usize, const A: usize> IntoIter<T, S, A>
+where
+    Align<A>: Alignment,
+{
+    pub fn new(inner: InlineDyn<[T], S, A>) -> Self {
+        Self {
+            storage: ManuallyDrop::new(inner),
+            pos: 0,
+        }
+    }
+}
+
+impl<T, const S: usize, const A: usize> Iterator for IntoIter<T, S, A>
+where
+    Align<A>: Alignment,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos < self.storage.len() {
+            let ret = unsafe { self.storage.as_ptr().add(self.pos).read() };
+            self.pos += 1;
+            Some(ret)
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.storage.len() - self.pos;
+        (left, Some(left))
+    }
+}
+
+impl<T, const S: usize, const A: usize> ExactSizeIterator for IntoIter<T, S, A> where
+    Align<A>: Alignment
+{
+}
+
+impl<T, const S: usize, const A: usize> FusedIterator for IntoIter<T, S, A> where Align<A>: Alignment
+{}
 
 #[cfg(all(feature = "nightly", feature = "alloc"))]
 pub mod alloc {
@@ -472,7 +635,8 @@ pub mod alloc {
         }
 
         unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-            self.get_ref().deallocate(ptr, layout)
+            // SAFETY: safety of call is a precondition.
+            unsafe { self.get_ref().deallocate(ptr, layout) }
         }
 
         fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
@@ -485,7 +649,8 @@ pub mod alloc {
             old_layout: Layout,
             new_layout: Layout,
         ) -> Result<NonNull<[u8]>, AllocError> {
-            self.get_ref().grow(ptr, old_layout, new_layout)
+            // SAFETY: safety of call is a precondition.
+            unsafe { self.get_ref().grow(ptr, old_layout, new_layout) }
         }
 
         unsafe fn grow_zeroed(
@@ -494,7 +659,8 @@ pub mod alloc {
             old_layout: Layout,
             new_layout: Layout,
         ) -> Result<NonNull<[u8]>, AllocError> {
-            self.get_ref().grow_zeroed(ptr, old_layout, new_layout)
+            // SAFETY: safety of call is a precondition.
+            unsafe { self.get_ref().grow_zeroed(ptr, old_layout, new_layout) }
         }
 
         unsafe fn shrink(
@@ -503,7 +669,8 @@ pub mod alloc {
             old_layout: Layout,
             new_layout: Layout,
         ) -> Result<NonNull<[u8]>, AllocError> {
-            self.get_ref().shrink(ptr, old_layout, new_layout)
+            // SAFETY: safety of call is a precondition.
+            unsafe { self.get_ref().shrink(ptr, old_layout, new_layout) }
         }
     }
 }
@@ -833,7 +1000,20 @@ cfg_if! {
 mod tests {
     use core::cell::Cell;
 
-    use super::{fmt::InlineDynDisplay, *};
+    use super::{fmt::InlineDynDebug, *};
+
+    macro_rules! assert_matches {
+        ($left:expr, $(|)? $($pattern:pat_param)|+ $(if $guard:expr)? $(,)?) => {
+            match $left {
+                $($pattern)|+ $(if $guard)? => {}
+                ref left_val => {
+                    panic!(r#"assertion failed: `(left matches right)`
+                     left: `{left_val:?}`
+                    right: `{}`"#, stringify!($($pattern)|+ $(if $guard)?))
+                }
+            }
+        };
+    }
 
     #[test]
     fn test_simple() {
@@ -857,25 +1037,25 @@ mod tests {
             let dbg = <dyn_star!(Debug, '_)>::new(Dropper(&mut dropped));
             assert_eq!(format!("{dbg:?}"), "Dropper(false)");
         }
-        assert_eq!(dropped, true);
+        assert!(dropped);
     }
 
     #[test]
     fn test_resize() {
-        let val = <dyn_star!(Display)>::new(42u8);
-        assert_eq!(val.to_string(), "42");
+        let val = <dyn_star!(Debug)>::new(42u8);
+        assert_eq!(format!("{val:?}"), "42");
 
-        let val: InlineDynDisplay<1> = <dyn_star!(Display)>::try_resize(val).ok().unwrap();
-        assert_eq!(val.to_string(), "42");
+        let val: InlineDynDebug<1> = <dyn_star!(Debug)>::try_resize(val).ok().unwrap();
+        assert_eq!(format!("{val:?}"), "42");
     }
 
     #[test]
     fn test_resize_insufficient() {
-        let val = <dyn_star!(Display)>::new(42u32);
-        assert_eq!(val.to_string(), "42");
+        let val = <dyn_star!(Debug)>::new(42u32);
+        assert_eq!(format!("{val:?}"), "42");
 
-        let res: Result<InlineDynDisplay<1>, _> = <dyn_star!(Display)>::try_resize(val);
-        assert!(res.is_err());
+        let res: Result<InlineDynDebug<1>, _> = <dyn_star!(Debug)>::try_resize(val);
+        assert_matches!(res, Err(_));
     }
 
     #[test]
@@ -904,19 +1084,6 @@ mod tests {
         assert_eq!(val.foo(), 0);
         assert_eq!(val.foo(), 1);
         assert_eq!(val.foo(), 2);
-    }
-
-    macro_rules! assert_matches {
-        ($left:expr, $(|)? $($pattern:pat_param)|+ $(if $guard:expr)? $(,)?) => {
-            match $left {
-                $($pattern)|+ $(if $guard)? => {}
-                ref left_val => {
-                    panic!(r#"assertion failed: `(left matches right)`
-                     left: `{left_val:?}`
-                    right: `{}`"#, stringify!($($pattern)|+ $(if $guard)?))
-                }
-            }
-        };
     }
 
     #[test]
@@ -951,10 +1118,10 @@ mod tests {
             poll_fn(|cx| {
                 cx.waker().wake_by_ref();
                 match amt {
-                    0 => return Poll::Ready(()),
+                    0 => Poll::Ready(()),
                     _ => {
                         *amt -= 1;
-                        return Poll::Pending;
+                        Poll::Pending
                     }
                 }
             })

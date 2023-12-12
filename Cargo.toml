@@ -24,3 +24,7 @@ std = ["alloc"]
 static_assertions = "1.1"
 cfg-if = "1.0.0"
 elain = "0.3"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unreachable_pub = "warn"

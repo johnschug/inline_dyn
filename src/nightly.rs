@@ -35,6 +35,26 @@ where
         unsafe { Self::with_metadata(metadata, value) }
     }
 
+    pub fn try_new<T>(value: T) -> Result<Self, T>
+    where
+        *const T: CoerceUnsized<*const D>,
+    {
+        // SAFETY: the metadata is created via
+        // [`core::ptr::metadata`](::core::ptr::metadata) which ensures that the
+        // metadata is appropriate for the value.
+        let metadata = pointee::unsize::<D, _>(&value);
+        unsafe { Self::try_with_metadata(metadata, value) }
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn try_or_box<T>(value: T) -> Self
+    where
+        *const T: CoerceUnsized<*const D>,
+        *const std_alloc::boxed::Box<T>: CoerceUnsized<*const D>,
+    {
+        Self::try_new(value).unwrap_or_else(|v| Self::new(Box::new(v)))
+    }
+
     /// Attempts to contruct a new [`InlineDyn`] by unboxing the given value.
     ///
     /// The size and alignment of the internal storage must be large enough to
@@ -57,11 +77,11 @@ where
 
         use crate::RawStorage;
 
-        let (size, align) = { (mem::size_of_val(&*value), mem::align_of_val(&*value)) };
-        if (size <= S) && (align <= mem::align_of::<RawStorage<S, A>>()) {
+        if RawStorage::<S, A>::is_layout_compatible::<D>(&*value) {
             let metadata = ptr::metadata(&*value);
             let mut storage = RawStorage::<S, A>::new();
             unsafe {
+                let size = mem::size_of_val(&*value);
                 let value: std_alloc::boxed::Box<ManuallyDrop<D>> = mem::transmute(value);
                 ptr::copy_nonoverlapping(
                     (&**value as *const D).cast::<MaybeUninit<u8>>(),
