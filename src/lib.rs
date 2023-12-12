@@ -514,7 +514,7 @@ macro_rules! impl_new {
             #[cfg(feature = "alloc")]
             pub fn try_or_box<_T>(value: _T) -> Self
             where _T: $trait + 'a, std_alloc::boxed::Box<_T>: $trait + 'a, {
-                Self::try_new(value).unwrap_or_else(|v| Self::new(std_alloc::boxed::Box::new(value)))
+                Self::try_new(value).unwrap_or_else(|v| Self::new(std_alloc::boxed::Box::new(v)))
             }
         }
     };
