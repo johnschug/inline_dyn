@@ -84,7 +84,7 @@ where
                 let size = mem::size_of_val(&*value);
                 let value: std_alloc::boxed::Box<ManuallyDrop<D>> = mem::transmute(value);
                 ptr::copy_nonoverlapping(
-                    (&**value as *const D).cast::<MaybeUninit<u8>>(),
+                    ptr::from_ref(&**value).cast::<MaybeUninit<u8>>(),
                     storage.as_mut_ptr(),
                     size,
                 );

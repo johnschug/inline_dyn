@@ -2,14 +2,24 @@
 #![allow(clippy::let_unit_value)]
 #![cfg_attr(
     feature = "nightly",
-    feature(unsize, coerce_unsized, doc_auto_cfg, ptr_metadata)
+    feature(
+        async_iterator,
+        can_vector,
+        coerce_unsized,
+        doc_auto_cfg,
+        error_generic_member_access,
+        error_in_core,
+        iter_advance_by,
+        ptr_metadata,
+        unsize,
+    )
 )]
 #![cfg_attr(all(feature = "nightly", feature = "alloc"), feature(allocator_api))]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #[cfg(feature = "alloc")]
 extern crate alloc as std_alloc;
 use core::{
-    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    fmt::Debug,
     iter::FusedIterator,
     marker::PhantomData,
     mem::{self, ManuallyDrop, MaybeUninit},
@@ -283,24 +293,6 @@ where
     }
 }
 
-impl<D: Debug + ?Sized, const S: usize, const A: usize> Debug for InlineDyn<D, S, A>
-where
-    Align<A>: Alignment,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        Debug::fmt(self.get_ref(), f)
-    }
-}
-
-impl<D: Display + ?Sized, const S: usize, const A: usize> Display for InlineDyn<D, S, A>
-where
-    Align<A>: Alignment,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        Display::fmt(self.get_ref(), f)
-    }
-}
-
 /// A trait for cloning trait objects dynamically.
 ///
 /// # Safety
@@ -444,14 +436,14 @@ cfg_if! {
         /// ```
         /// use inline_dyn::{fmt::InlineDynDisplay, inline_dyn};
         ///
-        /// let val: InlineDynDisplay = inline_dyn![42usize];
+        /// let val: InlineDynDisplay = inline_dyn!(42usize);
         /// assert_eq!(val.to_string(), "42");
         /// ```
         ///
         /// Trait not implemented:
         /// ```compile_fail
         /// use inline_dyn::{hash::InlineDynHasher, inline_dyn};
-        /// let value: InlineDynHasher = inline_dyn![5u8];
+        /// let value: InlineDynHasher = inline_dyn!(5u8);
         /// ```
         #[macro_export]
         macro_rules! inline_dyn {
@@ -483,14 +475,14 @@ cfg_if! {
         /// ```
         /// use inline_dyn::{fmt::InlineDynDisplay, inline_dyn};
         ///
-        /// let val: InlineDynDisplay = inline_dyn![42usize];
+        /// let val: InlineDynDisplay = inline_dyn!(42usize);
         /// assert_eq!(val.to_string(), "42");
         /// ```
         ///
         /// Trait not implemented:
         /// ```compile_fail
         /// use inline_dyn::{hash::InlineDynHasher, inline_dyn};
-        /// let value: InlineDynHasher = inline_dyn![5u8];
+        /// let value: InlineDynHasher = inline_dyn!(5u8);
         /// ```
         #[macro_export]
         macro_rules! inline_dyn {
@@ -546,6 +538,10 @@ cfg_if! {
             /// ```
             pub fn new<const N: usize>(value: [T; N]) -> Self {
                 unsafe { Self::with_cast(value, |p| p) }
+            }
+
+            pub fn try_new<const N: usize>(value: [T; N]) -> Result<Self, [T; N]> {
+                unsafe { Self::try_with_cast(value, |p| p) }
             }
         }
     }
@@ -680,8 +676,8 @@ pub mod alloc {
 
     unsafe impl<D, const S: usize, const A: usize> Allocator for InlineDyn<D, S, A>
     where
-        D: Allocator,
         Align<A>: Alignment,
+        D: Allocator,
     {
         fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
             self.get_ref().allocate(layout)
@@ -745,14 +741,14 @@ pub mod any {
         Align<A>: Alignment,
     {
         pub fn new<T: Any>(value: T) -> Self {
-            inline_dyn![value]
+            inline_dyn!(value)
         }
     }
 
     impl<D, const S: usize, const A: usize> InlineDyn<D, S, A>
     where
-        D: Any + ?Sized,
         Align<A>: Alignment,
+        D: Any + ?Sized,
     {
         pub fn downcast<T: Any>(self) -> Result<T, Self> {
             if self.get_ref().type_id() == TypeId::of::<T>() {
@@ -767,8 +763,51 @@ pub mod any {
     }
 }
 
-pub mod convert {
+#[cfg(feature = "nightly")]
+pub mod async_iter {
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
+    use core::async_iter::AsyncIterator;
+
+    pub type InlineDynAsyncIterator<'a, T, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn AsyncIterator<Item = T> + 'a, S, A>;
+
+    impl_new!(AsyncIterator<Item = T>, T);
+
+    impl<I, const S: usize, const A: usize> AsyncIterator for InlineDyn<I, S, A>
+    where
+        Align<A>: Alignment,
+        I: AsyncIterator + ?Sized,
+    {
+        type Item = I::Item;
+
+        fn poll_next(
+            self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<Option<Self::Item>> {
+            self.get_pinned_mut().poll_next(cx)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.get_ref().size_hint()
+        }
+    }
+}
+
+pub mod borrow {
+
     use crate::{InlineDyn, DEFAULT_SIZE};
+
+    pub type InlineDynBorrow<'a, T, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn core::borrow::Borrow<T> + 'a, S, A>;
+    pub type InlineDynBorrowMut<'a, T, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn core::borrow::BorrowMut<T> + 'a, S, A>;
+
+    impl_new!(core::borrow::Borrow<T>, T);
+    impl_new!(core::borrow::BorrowMut<T>, T);
+}
+
+pub mod convert {
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
 
     pub type InlineDynAsRef<'a, U, const S: usize = DEFAULT_SIZE, const A: usize = S> =
         InlineDyn<dyn core::convert::AsRef<U> + 'a, S, A>;
@@ -777,18 +816,177 @@ pub mod convert {
 
     impl_new!(AsRef<U>, U);
     impl_new!(AsMut<U>, U);
+
+    impl<T, U, const S: usize, const A: usize> AsRef<U> for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: AsRef<U> + ?Sized,
+        U: ?Sized,
+    {
+        fn as_ref(&self) -> &U {
+            self.get_ref().as_ref()
+        }
+    }
+
+    impl<T, U, const S: usize, const A: usize> AsMut<U> for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: AsMut<U> + ?Sized,
+        U: ?Sized,
+    {
+        fn as_mut(&mut self) -> &mut U {
+            self.get_mut().as_mut()
+        }
+    }
 }
 
 pub mod fmt {
-    use crate::{InlineDyn, DEFAULT_SIZE};
+    use core::fmt::{
+        Binary, Debug, Display, Formatter, LowerExp, LowerHex, Octal, Pointer, Result as FmtResult,
+        UpperExp, UpperHex, Write,
+    };
 
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
+
+    pub type InlineDynBinary<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Binary + 'a, S, A>;
     pub type InlineDynDebug<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
-        InlineDyn<dyn core::fmt::Debug + 'a, S, A>;
+        InlineDyn<dyn Debug + 'a, S, A>;
     pub type InlineDynDisplay<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
-        InlineDyn<dyn core::fmt::Display + 'a, S, A>;
+        InlineDyn<dyn Display + 'a, S, A>;
+    pub type InlineDynLowerExp<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn LowerExp + 'a, S, A>;
+    pub type InlineDynLowerHex<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn LowerHex + 'a, S, A>;
+    pub type InlineDynOctal<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Octal + 'a, S, A>;
+    pub type InlineDynPointer<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Pointer + 'a, S, A>;
+    pub type InlineDynUpperExp<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn UpperExp + 'a, S, A>;
+    pub type InlineDynUpperHex<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn UpperHex + 'a, S, A>;
+    pub type InlineDynWrite<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Write + 'a, S, A>;
 
-    impl_new!(core::fmt::Debug);
-    impl_new!(core::fmt::Display);
+    impl_new!(Binary);
+    impl_new!(Debug);
+    impl_new!(Display);
+    impl_new!(LowerExp);
+    impl_new!(LowerHex);
+    impl_new!(Octal);
+    impl_new!(Pointer);
+    impl_new!(UpperExp);
+    impl_new!(UpperHex);
+    impl_new!(Write);
+
+    impl<T, const S: usize, const A: usize> Binary for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: Binary + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Binary::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> Debug for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: Debug + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Debug::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> Display for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: Display + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Display::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> LowerExp for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: LowerExp + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            LowerExp::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> LowerHex for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: LowerHex + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            LowerHex::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> Octal for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: Octal + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Octal::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> Pointer for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: Pointer + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Pointer::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> UpperExp for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: UpperExp + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            UpperExp::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> UpperHex for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: UpperHex + ?Sized,
+    {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            UpperHex::fmt(self.get_ref(), f)
+        }
+    }
+
+    impl<T, const S: usize, const A: usize> Write for InlineDyn<T, S, A>
+    where
+        Align<A>: Alignment,
+        T: Write + ?Sized,
+    {
+        fn write_str(&mut self, s: &str) -> FmtResult {
+            self.get_mut().write_str(s)
+        }
+
+        fn write_char(&mut self, c: char) -> FmtResult {
+            self.get_mut().write_char(c)
+        }
+
+        fn write_fmt(&mut self, args: core::fmt::Arguments<'_>) -> FmtResult {
+            self.get_mut().write_fmt(args)
+        }
+    }
 }
 
 pub mod future {
@@ -799,10 +997,10 @@ pub mod future {
         task::{Context, Poll},
     };
 
-    pub type InlineDynFuture<'a, O, const S: usize = DEFAULT_SIZE, const A: usize = S> =
-        InlineDyn<dyn Future<Output = O> + 'a, S, A>;
+    pub type InlineDynFuture<'a, T, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Future<Output = T> + 'a, S, A>;
 
-    impl_new!(Future<Output = O>, O);
+    impl_new!(Future<Output = T>, T);
 
     impl<F, const S: usize, const A: usize> Future for InlineDyn<F, S, A>
     where
@@ -853,9 +1051,12 @@ pub mod iter {
         const S: usize = DEFAULT_SIZE,
         const A: usize = S,
     > = InlineDyn<dyn DoubleEndedIterator<Item = I> + 'a, S, A>;
+    pub type InlineDynIntoIterator<'a, I, T, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn IntoIterator<IntoIter = I, Item = T> + 'a, S, A>;
 
-    impl_new!(Iterator<Item = I>, I);
-    impl_new!(DoubleEndedIterator<Item = I>, I);
+    impl_new!(Iterator<Item = T>, T);
+    impl_new!(DoubleEndedIterator<Item = T>, T);
+    impl_new!(IntoIterator<IntoIter = I, Item = T>, I, T);
 
     impl<I, const S: usize, const A: usize> Iterator for InlineDyn<I, S, A>
     where
@@ -875,6 +1076,11 @@ pub mod iter {
         fn nth(&mut self, n: usize) -> Option<Self::Item> {
             self.get_mut().nth(n)
         }
+
+        #[cfg(feature = "nightly")]
+        fn advance_by(&mut self, n: usize) -> Result<(), core::num::NonZeroUsize> {
+            self.get_mut().advance_by(n)
+        }
     }
 
     impl<I, const S: usize, const A: usize> DoubleEndedIterator for InlineDyn<I, S, A>
@@ -888,6 +1094,11 @@ pub mod iter {
 
         fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
             self.get_mut().nth_back(n)
+        }
+
+        #[cfg(feature = "nightly")]
+        fn advance_back_by(&mut self, n: usize) -> Result<(), core::num::NonZeroUsize> {
+            self.get_mut().advance_back_by(n)
         }
     }
 
@@ -937,37 +1148,47 @@ pub mod ops {
     }
 }
 
-cfg_if! {
-    if #[cfg(feature = "std")] {
-        pub mod error {
-            use std::error::Error;
+#[cfg(any(feature = "std", feature = "nightly"))]
+pub mod error {
+    #[cfg(feature = "nightly")]
+    use core::error::Error;
+    #[cfg(not(feature = "nightly"))]
+    use std::error::Error;
 
-            use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
+    use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
 
-            pub type InlineDynError<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> = InlineDyn<dyn Error + 'a, S, A>;
+    pub type InlineDynError<'a, const S: usize = DEFAULT_SIZE, const A: usize = S> =
+        InlineDyn<dyn Error + 'a, S, A>;
 
-            impl_new!(Error);
+    impl_new!(Error);
 
-            #[allow(deprecated)]
-            impl<E, const S: usize, const A: usize> Error for InlineDyn<E, S, A>
-            where
-                E: Error + ?Sized,
-                Align<A>: Alignment,
-            {
-                fn description(&self) -> &str {
-                    self.get_ref().description()
-                }
-
-                fn cause(&self) -> Option<&dyn Error> {
-                    self.get_ref().cause()
-                }
-
-                fn source(&self) -> Option<&(dyn Error + 'static)> {
-                    self.get_ref().source()
-                }
-            }
+    #[allow(deprecated)]
+    impl<E, const S: usize, const A: usize> Error for InlineDyn<E, S, A>
+    where
+        E: Error + ?Sized,
+        Align<A>: Alignment,
+    {
+        fn description(&self) -> &str {
+            self.get_ref().description()
         }
 
+        fn cause(&self) -> Option<&dyn Error> {
+            self.get_ref().cause()
+        }
+
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.get_ref().source()
+        }
+
+        #[cfg(feature = "nightly")]
+        fn provide<'a>(&'a self, request: &mut core::error::Request<'a>) {
+            self.get_ref().provide(request)
+        }
+    }
+}
+
+cfg_if! {
+    if #[cfg(feature = "std")] {
         pub mod io {
             use crate::{Align, Alignment, InlineDyn, DEFAULT_SIZE};
             use std::io;
@@ -998,6 +1219,11 @@ cfg_if! {
                 fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
                     self.get_mut().read_exact(buf)
                 }
+
+                #[cfg(feature = "nightly")]
+                fn is_read_vectored(&self) -> bool {
+                    self.get_ref().is_read_vectored()
+                }
             }
 
             impl<T, const S: usize, const A: usize> io::Write for InlineDyn<T, S, A>
@@ -1019,6 +1245,11 @@ cfg_if! {
 
                 fn flush(&mut self) -> io::Result<()> {
                     self.get_mut().flush()
+                }
+
+                #[cfg(feature = "nightly")]
+                fn is_write_vectored(&self) -> bool {
+                    self.get_ref().is_write_vectored()
                 }
             }
 

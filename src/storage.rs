@@ -2,6 +2,7 @@ use core::{
     cell::UnsafeCell,
     marker::PhantomPinned,
     mem::{self, ManuallyDrop, MaybeUninit},
+    ptr,
 };
 
 pub use elain::{Align, Alignment};
@@ -36,7 +37,7 @@ where
 {
     // The `UnsafeCell` here is needed to ensure soundness when storing values that allow
     // interior mutability.
-    data: ManuallyDrop<UnsafeCell<[MaybeUninit<u8>; SIZE]>>,
+    data: ManuallyDrop<UnsafeCell<MaybeUninit<[u8; SIZE]>>>,
     _align: Align<ALIGN>,
     // This makes `RawStorage: !Unpin` and is needed to ensure soundness when storing values
     // that are `!Unpin`.
@@ -58,22 +59,19 @@ where
     }
 
     pub(crate) const fn new() -> Self {
-        // SAFETY: `data` is an array of `MaybeUninit<u8>` which do not require initialization.
         Self {
-            data: ManuallyDrop::new(UnsafeCell::new(unsafe {
-                MaybeUninit::uninit().assume_init()
-            })),
+            data: ManuallyDrop::new(UnsafeCell::new(MaybeUninit::uninit())),
         }
     }
 
-    pub(crate) fn as_ptr(&self) -> *const MaybeUninit<u8> {
+    pub(crate) const fn as_ptr(&self) -> *const MaybeUninit<u8> {
         // SAFETY: `data` is the only variant that is used and is always initialized by `Self::new()`.
-        unsafe { self.data.get().cast_const().cast() }
+        unsafe { ptr::addr_of!(self.data).cast() }
     }
 
     pub(crate) fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
         // SAFETY: `data` is the only variant that is used and is always initialized by `Self::new()`.
-        unsafe { self.data.get().cast() }
+        unsafe { ptr::addr_of_mut!(self.data).cast() }
     }
 }
 
