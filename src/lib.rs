@@ -15,7 +15,7 @@ use core::{
     mem::{self, ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
     pin::Pin,
-    ptr,
+    ptr, slice,
 };
 
 use cfg_if::cfg_if;
@@ -317,21 +317,26 @@ where
 /// trait DynValue: DynClone + Display {}
 /// impl<T: Clone + Display> DynValue for T {}
 ///
-/// let val: dyn_star!(DynValue) = inline_dyn![5u8];
+/// let val: dyn_star!(DynValue) = inline_dyn!(5u8);
 /// let val2 = val.clone();
 /// assert_eq!(val2.to_string(), "5");
 /// ```
 pub unsafe trait DynClone {
+    /// Writes a copy of the value into `storage`.
+    ///
+    /// # Safety
+    ///
+    /// The provided `storage` must have a size and alignment suitable
+    /// for storing a clone of `self`.
     #[doc(hidden)]
-    fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]);
+    unsafe fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]);
 }
 
-unsafe impl<T> crate::DynClone for T
+unsafe impl<T> DynClone for T
 where
     T: Clone,
 {
-    /// Writes a copy of the value into `storage`.
-    fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]) {
+    unsafe fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]) {
         assert!(mem::size_of::<Self>() <= storage.len());
         let this = (*self).clone();
         unsafe {
@@ -340,13 +345,61 @@ where
     }
 }
 
+unsafe impl<T> DynClone for [T]
+where
+    T: Clone,
+{
+    unsafe fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]) {
+        struct Guard<'a, T> {
+            slice: &'a mut [MaybeUninit<T>],
+            init: usize,
+        }
+
+        impl<T> Drop for Guard<'_, T> {
+            fn drop(&mut self) {
+                // SAFETY: the guard owns the contents of the slice until it is
+                // forgotten at the end of the function and `init` is updated
+                // after each element is successfully cloned and written, so the
+                // slice is guaranteed to be initialized and safe to drop.
+                unsafe {
+                    let initialized_part: &mut [T] = mem::transmute(&mut self.slice[..self.init]);
+                    ptr::drop_in_place(initialized_part);
+                }
+            }
+        }
+
+        let len = self.len();
+        // SAFETY: the precondition for this function requires the slice to have
+        // a compatible layout
+        let dst = unsafe {
+            slice::from_raw_parts_mut(storage.as_mut_ptr().cast::<MaybeUninit<T>>(), len)
+        };
+        let mut guard = Guard {
+            slice: dst,
+            init: 0,
+        };
+        for (src, dst) in self.iter().zip(guard.slice.iter_mut()) {
+            dst.write(src.clone());
+            guard.init += 1;
+        }
+        mem::forget(guard);
+    }
+}
+
+unsafe impl DynClone for str {
+    unsafe fn dyn_clone_into(&self, storage: &mut [MaybeUninit<u8>]) {
+        assert!(self.len() <= storage.len());
+        // SAFETY: &str and &[MaybeUninit<u8>] have the same layout
+        let this: &[MaybeUninit<u8>] = unsafe { mem::transmute(self) };
+        storage[..self.len()].copy_from_slice(this);
+    }
+}
+
 impl<D: DynClone + ?Sized, const S: usize, const A: usize> Clone for InlineDyn<D, S, A>
 where
     Align<A>: Alignment,
 {
     fn clone(&self) -> Self {
-        use core::slice;
-
         let mut storage = RawStorage::new();
         // SAFETY: The implementation requirement for `DynClone` ensures a valid
         // value of the same type as the current value is written to `storage`,
@@ -575,7 +628,7 @@ impl<T, const S: usize, const A: usize> IntoIter<T, S, A>
 where
     Align<A>: Alignment,
 {
-    pub fn new(inner: InlineDyn<[T], S, A>) -> Self {
+    pub const fn new(inner: InlineDyn<[T], S, A>) -> Self {
         Self {
             storage: ManuallyDrop::new(inner),
             pos: 0,
@@ -998,7 +1051,8 @@ cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use core::cell::Cell;
+    use core::{cell::Cell, panic::AssertUnwindSafe};
+    use std::panic;
 
     use super::{fmt::InlineDynDebug, *};
 
@@ -1062,6 +1116,9 @@ mod tests {
     fn test_slice() {
         let val = InlineDyn::<[u8], 4>::new([1, 2, 3, 4]);
         assert_eq!(val.get_ref(), [1, 2, 3, 4]);
+
+        let res = InlineDyn::<[u8], 3, 1>::try_new([1, 2, 3, 4]);
+        assert_matches!(res, Err(_));
     }
 
     #[test]
@@ -1080,7 +1137,7 @@ mod tests {
             }
         }
 
-        let val: dyn_star!(Foo) = inline_dyn![Bar(Cell::new(0))];
+        let val: dyn_star!(Foo) = inline_dyn!(Bar(Cell::new(0)));
         assert_eq!(val.foo(), 0);
         assert_eq!(val.foo(), 1);
         assert_eq!(val.foo(), 2);
@@ -1139,5 +1196,105 @@ mod tests {
         assert_matches!(fut.as_mut().poll(&mut cx), Poll::Pending);
         assert_matches!(fut.as_mut().poll(&mut cx), Poll::Pending);
         assert_matches!(fut.as_mut().poll(&mut cx), Poll::Ready(42));
+    }
+
+    #[test]
+    fn test_clone() {
+        trait DynValue: DynClone + Debug {}
+        impl<T: Clone + Debug> DynValue for T {}
+
+        #[derive(Debug)]
+        struct Dropper<'a>(&'a Cell<(usize, usize)>);
+
+        impl Clone for Dropper<'_> {
+            fn clone(&self) -> Self {
+                let (cloned, dropped) = self.0.get();
+                self.0.set((cloned + 1, dropped));
+                Self(self.0)
+            }
+        }
+
+        impl Drop for Dropper<'_> {
+            fn drop(&mut self) {
+                let (cloned, dropped) = self.0.get();
+                self.0.set((cloned, dropped + 1));
+            }
+        }
+
+        let dropped = Cell::new((0, 0));
+        let val: dyn_star!(DynValue, '_) = inline_dyn!(Dropper(&dropped));
+        assert_eq!(dropped.get(), (0, 0));
+        let val2 = val.clone();
+        assert_eq!(dropped.get(), (1, 0));
+        drop(val);
+        assert_eq!(dropped.get(), (1, 1));
+        drop(val2);
+        assert_eq!(dropped.get(), (1, 2));
+    }
+
+    #[test]
+    fn test_clone_slice() {
+        #[derive(Debug, Clone)]
+        struct Dropper<'a>(&'a Cell<usize>);
+
+        impl Drop for Dropper<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let dropped = Cell::new(0usize);
+        let value = <InlineDyn<[_], 1024, 16>>::new([
+            Dropper(&dropped),
+            Dropper(&dropped),
+            Dropper(&dropped),
+            Dropper(&dropped),
+        ]);
+        let cloned = value.clone();
+        assert_eq!(dropped.get(), 0);
+        drop(value);
+        assert_eq!(dropped.get(), 4);
+        drop(cloned);
+        assert_eq!(dropped.get(), 8);
+    }
+
+    #[test]
+    fn test_clone_panic() {
+        #[derive(Debug)]
+        struct Dropper<'a>(&'a Cell<(usize, usize)>);
+
+        impl Clone for Dropper<'_> {
+            fn clone(&self) -> Self {
+                let (cloned, dropped) = self.0.get();
+                if cloned == 3 {
+                    panic!("boom!");
+                }
+                self.0.set((cloned + 1, dropped));
+                Self(self.0)
+            }
+        }
+
+        impl Drop for Dropper<'_> {
+            fn drop(&mut self) {
+                let (cloned, dropped) = self.0.get();
+                self.0.set((cloned, dropped + 1));
+            }
+        }
+
+        let dropped = Cell::new((0usize, 0usize));
+        let value = <InlineDyn<[_], 1024, 16>>::new([
+            Dropper(&dropped),
+            Dropper(&dropped),
+            Dropper(&dropped),
+            Dropper(&dropped),
+        ]);
+        panic::catch_unwind(AssertUnwindSafe(|| {
+            assert_eq!(dropped.get(), (0, 0));
+            value.clone()
+        }))
+        .expect_err("clone should have panicked");
+        assert_eq!(dropped.get(), (3, 3));
+        drop(value);
+        assert_eq!(dropped.get(), (3, 7));
     }
 }

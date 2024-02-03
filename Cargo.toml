@@ -2,7 +2,6 @@
 name = "inline_dyn"
 version = "0.2.1"
 edition = "2021"
-authors = ["John Schug <john.ips.schug@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/johnschug/inline_dyn"
 categories = ["no-std", "rust-patterns"]
