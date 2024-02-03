@@ -4,7 +4,6 @@
     feature = "nightly",
     feature(
         async_iterator,
-        can_vector,
         coerce_unsized,
         doc_auto_cfg,
         error_generic_member_access,
@@ -15,6 +14,7 @@
     )
 )]
 #![cfg_attr(all(feature = "nightly", feature = "alloc"), feature(allocator_api))]
+#![cfg_attr(all(feature = "nightly", feature = "std"), feature(can_vector))]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #[cfg(feature = "alloc")]
 extern crate alloc as std_alloc;
@@ -509,10 +509,16 @@ cfg_if! {
         }
 
         #[cfg(feature = "alloc")]
+        #[doc(hidden)]
+        pub fn new_box<T>(val: T) -> std_alloc::boxed::Box<T> {
+            std_alloc::boxed::Box::new(val)
+        }
+
+        #[cfg(feature = "alloc")]
         #[macro_export]
         macro_rules! inline_dyn_box {
             ($e:expr) => {{
-                $crate::inline_dyn_try!($e).unwrap_or_else(|v| $crate::inline_dyn!(Box::new(v)))
+                $crate::inline_dyn_try!($e).unwrap_or_else(|v| $crate::inline_dyn!($crate::new_box(v)))
             }};
         }
 
@@ -563,7 +569,7 @@ macro_rules! impl_new {
             #[cfg(feature = "alloc")]
             pub fn try_or_box<_T>(value: _T) -> Self
             where _T: $trait + 'a, std_alloc::boxed::Box<_T>: $trait + 'a, {
-                Self::try_new(value).unwrap_or_else(|v| Self::new(std_alloc::boxed::Box::new(v)))
+                Self::try_new(value).unwrap_or_else(|v| Self::new(crate::new_box(v)))
             }
         }
     };

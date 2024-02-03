@@ -52,7 +52,7 @@ where
         *const T: CoerceUnsized<*const D>,
         *const std_alloc::boxed::Box<T>: CoerceUnsized<*const D>,
     {
-        Self::try_new(value).unwrap_or_else(|v| Self::new(Box::new(v)))
+        Self::try_new(value).unwrap_or_else(|v| Self::new(std_alloc::boxed::Box::new(v)))
     }
 
     /// Attempts to contruct a new [`InlineDyn`] by unboxing the given value.
